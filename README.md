@@ -4,7 +4,7 @@
 
 # abreloaded_nx
 
-**Angry Birds Reloaded 2.2.16218 on Nintendo Switch**
+**Angry Birds Reloaded on Nintendo Switch**
 
 An unofficial Nintendo Switch wrapper for the Android version of
 **Angry Birds Reloaded**.
