@@ -31,10 +31,13 @@ def main():
         for n in sorted(names):
             if n.startswith("assets/") and not n.endswith("/"):
                 dst=out/n; dst.parent.mkdir(parents=True,exist_ok=True); dst.write_bytes(z.read(n))
-    # Cursor files shipped by this portkit.
-    template=Path(__file__).resolve().parent.parent/"sd_template/switch/stupidzombies"
-    for f in template.iterdir():
-        if f.is_file(): shutil.copy2(f,out/f.name)
+    # Cursor files shipped by this repository.
+    repo_root = Path(__file__).resolve().parent.parent
+    for name in ("cursor_pointer.png", "cursor_grab.png"):
+        src = repo_root / name
+        if not src.is_file():
+            raise SystemExit(f"missing {src}")
+        shutil.copy2(src, out / name)
     if args.nro:
         shutil.copy2(args.nro,out/"stupidzombies_nx.nro")
     print(f"Prepared {out}")
