@@ -6,8 +6,6 @@ Stupid Zombies NX is a native Nintendo Switch wrapper/port of the Android ARM64 
 
 It loads the original game's ARM64 Unity libraries and runs them on Nintendo Switch through a lightweight Android/JNI compatibility layer.
 
-Current port version: **R3.70.23**
-
 Target game:
 
 - Stupid Zombies 3.4.5
