@@ -66,6 +66,7 @@ void diag_frame(int frame);
 
 /* Spawn the watchdog. Idempotent. Call once after boot, before the loop. */
 void diag_watchdog_start(void);
+void diag_watchdog_stop(void);
 
 #ifdef __cplusplus
 }

@@ -977,6 +977,58 @@ static EGLBoolean egl_QuerySurface_log(EGLDisplay d, EGLSurface s, EGLint attr, 
 // count per presented frame, and the surface size eglSwapBuffers sees.
 // ---------------------------------------------------------------------------
 static unsigned long g_draw_calls = 0, g_swap_count = 0;
+/* R3.45: last completed Unity frame, read by nx_pointer only. */
+volatile unsigned long g_sz_last_frame_draws = 0;
+
+/* SZ_R3703_AUDIO_HANDOFF
+ * Keep R3.70.1's English console loader.
+ * Once Unity owns EGL, cover the framebuffer in BLACK until:
+ *   1) R3.62 sees the real menu/root visual, and
+ *   2) FMOD output is ready.
+ * No HID/input/Store/Settings/privacy changes.
+ */
+static int g_sz_r3703_handoff_done = 0;
+static int g_sz_r3703_menu_seen = 0;
+
+static void sz_r3703_audio_handoff_draw(unsigned long unity_draws) {
+  if (g_sz_r3703_handoff_done)
+    return;
+
+  extern int nxp_r362_result_visual_is_on(void);
+  extern int fmod_audio_loader_ready(void);
+
+  const int menu_now = nxp_r362_result_visual_is_on();
+  const int audio_now = fmod_audio_loader_ready();
+
+  if (menu_now && !g_sz_r3703_menu_seen) {
+    g_sz_r3703_menu_seen = 1;
+    debugPrintf("[load703] real menu READY at swap=%lu draws=%lu\n",
+                g_swap_count, unity_draws);
+  }
+
+  GLint old_box[4] = {0,0,0,0};
+  GLfloat old_clear[4] = {0,0,0,1};
+  GLboolean old_scissor = glIsEnabled(GL_SCISSOR_TEST);
+
+  glGetIntegerv(GL_SCISSOR_BOX, old_box);
+  glGetFloatv(GL_COLOR_CLEAR_VALUE, old_clear);
+
+  glDisable(GL_SCISSOR_TEST);
+  glClearColor(0,0,0,1);
+  glClear(GL_COLOR_BUFFER_BIT);
+
+  glClearColor(old_clear[0], old_clear[1], old_clear[2], old_clear[3]);
+  glScissor(old_box[0], old_box[1], old_box[2], old_box[3]);
+  if (old_scissor) glEnable(GL_SCISSOR_TEST);
+
+  /* Keep this final black frame; the NEXT swap reveals menu + ready music. */
+  if (g_sz_r3703_menu_seen && audio_now) {
+    g_sz_r3703_handoff_done = 1;
+    debugPrintf("[load703] handoff READY menu=1 audio=1 at swap=%lu; "
+                "next swap reveals game\n", g_swap_count);
+  }
+}
+
 static int g_last_vp_w = -1, g_last_vp_h = -1;
 
 static void gl_Viewport_log(GLint x, GLint y, GLsizei w, GLsizei h) {
@@ -1075,8 +1127,13 @@ static EGLBoolean egl_SwapBuffers_log(EGLDisplay d, EGLSurface s) {
                   "[gfx]    0x8D56=MULTISAMPLE)\n", (int)fbo, (unsigned)st);
     }
   }
+  g_sz_last_frame_draws = g_draw_calls;
+  const unsigned long sz_r3703_frame_draws = g_draw_calls;
   g_draw_calls = 0;
-  android_native_draw_cursor();          /* overlay the docked cursor, then present */
+
+  /* Detector sees true Unity frame; black cover is applied last. */
+  android_native_draw_cursor();
+  sz_r3703_audio_handoff_draw(sz_r3703_frame_draws);          /* overlay the docked cursor, then present */
   /* First-present hang mitigation + probe: force the frame's GPU work to
    * complete before handing the surface to mesa's present. If the present
    * was blocked waiting on that work, this unblocks it; if the work itself

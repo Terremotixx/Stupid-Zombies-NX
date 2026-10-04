@@ -98,6 +98,9 @@ typedef struct { uintptr_t p; size_t sz; } CanEnt;
 static CanEnt g_can[CAN_TAB_N];
 static Mutex  g_can_lk;
 static int    g_can_sweeper = 0;
+static volatile int g_can_stop = 0;
+static int    g_can_thread_live = 0;
+static Thread g_can_thread;
 static unsigned g_can_evict = 0, g_can_live = 0;   /* coverage, see can_track */
 
 static inline unsigned can_slot(uintptr_t a) {
@@ -125,8 +128,9 @@ static void can_report(uintptr_t p, size_t sz, const char *when) {
 }
 static void can_sweeper_thread(void *arg) {
   (void)arg;
-  for (;;) {
+  while (!g_can_stop) {
     svcSleepThread(2000000000ULL);   /* 2s */
+    if (g_can_stop) break;
     mutexLock(&g_can_lk);
     for (unsigned i = 0; i < CAN_TAB_N; i++) {
       if (g_can[i].p && !can_ok(g_can[i].p, g_can[i].sz)) {
@@ -143,9 +147,10 @@ static void can_track(void *p, size_t sz) {
   mutexLock(&g_can_lk);
   if (!g_can_sweeper) {
     g_can_sweeper = 1;
-    static Thread t;
-    if (R_SUCCEEDED(threadCreate(&t, can_sweeper_thread, NULL, NULL, 0x4000, 0x3B, -2)))
-      threadStart(&t);
+    g_can_stop = 0;
+    Result _canrc = threadCreate(&g_can_thread, can_sweeper_thread, NULL, NULL, 0x4000, 0x3B, -2);
+    if (R_SUCCEEDED(_canrc) && R_SUCCEEDED(threadStart(&g_can_thread)))
+      g_can_thread_live = 1;
   }
   unsigned s = can_slot((uintptr_t)p);
   /* Round 147: measure the loss. "No SMASH in the log" has been quoted as
@@ -159,6 +164,19 @@ static void can_track(void *p, size_t sz) {
   g_can[s].p = (uintptr_t)p; g_can[s].sz = sz;   /* lossy: eviction ok */
   mutexUnlock(&g_can_lk);
 }
+/* SZ_R313_CANARY_STOP */
+void nx_canary_sweeper_stop(void) {
+  if (!g_can_sweeper) return;
+  g_can_stop = 1;
+  if (g_can_thread_live) {
+    threadWaitForExit(&g_can_thread);
+    threadClose(&g_can_thread);
+    g_can_thread_live = 0;
+  }
+  g_can_sweeper = 0;
+  debugPrintf("[quitthr] canary sweeper stopped\n");
+}
+
 /* Coverage of the tail-canary detector. Reported on the heartbeat so that
  * "no SMASH" can be read as evidence rather than hope. */
 void nx_canary_stats(unsigned *live, unsigned *evicted, unsigned *slots) {

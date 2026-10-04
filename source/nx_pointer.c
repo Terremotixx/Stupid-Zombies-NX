@@ -15,6 +15,8 @@
 
 #include "nx_pointer.h"
 
+extern volatile unsigned long g_sz_last_frame_draws;
+
 /* ------------------------------------------------------------------ config */
 
 static NxpConfig s_cfg;
@@ -39,14 +41,56 @@ static int   s_handle_touch = 1;
 /* touch (handheld) */
 static int   s_touch_active[16];
 static float s_touch_x[16], s_touch_y[16];
+/* R3.27: one real frame of zero-delta touch before UP. */
+static unsigned char s_touch_release_wait[16];
 
 /* cursor */
 static float s_cx, s_cy;
 static int   s_visible   = -1;      /* -1 = not yet decided */
 static int   s_was_docked = -1;
-static int   s_tap_prev  = 0;       /* A or mouse-left held last frame */
+static int   s_tap_prev  = 0;
+
+/* R3.70.8 START fire quarantine.
+ * nx_pointer owns a separate PadState from android_native_unity.  When START
+ * opens Pause, abort only the controller-generated A/ZR/ZL tap state here so a
+ * later containment/overlay transition cannot synthesize an NXP_UP (shot). */
+static int   s_r3708_start_fire_quarantine = 0;
+
+/* R3.62: actual visible result overlay (You Failed / Level Cleared). */
+static volatile int s_r362_result_visual = 0;
+static int s_r362_result_score = 0;
+
+/* R3.69: Settings close confirmation.  Read-only public view of the
+ * framebuffer detector; no change to R3.62 detection itself. */
+int nxp_r362_result_visual_is_on(void) {
+  return s_r362_result_visual ? 1 : 0;
+}
+
+/* R3.70.23: a newly-created Level can never already be in our START pause
+ * state. Clear the temporal framebuffer detector too, otherwise a Pause/result
+ * visual from the previous Level can survive long enough to reject START. */
+void nxp_r362_visual_reset(void) {
+  s_r362_result_score = 0;
+  s_r362_result_visual = 0;
+}
+
+/* R3.45: a press begun on static UI may not leak to the next screen. */
+static int   s_static_ui_press = 0;
+static int   s_last_ui_class = -1;       /* A or mouse-left held last frame */
+static int   s_cursor_release_wait = 0;
+static float s_cursor_release_x = 0.0f, s_cursor_release_y = 0.0f;
 static int   s_cursor_unlocked = 1; /* false until startup frame delay ends */
 static int   s_cursor_delay_count = 0;
+
+/* R3.27: hidden one-finger drag for analog-stick edge panning.
+ * Real fingers use 0..7 and the visible cursor uses 8; UI_MAX_POINTERS is 10,
+ * so pointer id 9 is the last valid slot. */
+#define EDGE_PAN_ID 9
+static int   s_edge_pan_active = 0;
+static int   s_edge_pan_dir = 0;
+static int   s_edge_pan_frames = 0;
+static float s_edge_pan_x = 0.0f;
+static float s_edge_pan_y = 0.0f;
 
 /* tunables, adjusted live */
 static float s_stick_speed;         /* px/frame at full stick deflection */
@@ -63,6 +107,13 @@ static int s_gyro_logged = 0;
 /* A USB mouse takes priority: gyro is switched off while one is connected. */
 static int s_mouse_connected = 0;
 
+/* R3.35: mouse overlay auto-hide. */
+#define MOUSE_HIDE_FRAMES 120
+static int s_mouse_activity_this_frame = 0;
+static int s_mouse_idle_frames = 0;
+static int s_mouse_auto_hidden = 0;
+static int s_pointer_owner_mouse = 0;
+
 /* Raw angular velocity -> px/frame. The gyro reports a RATE, so this is the
  * per-frame gain; s_gyro_sens scales it and D-pad U/D tunes that live.
  * Measured on hardware: a normal turn gives |angular_velocity| ~0.14, so at the
@@ -77,6 +128,8 @@ static int   s_dpad_hold = 0;
  * writes the file once rather than twenty times. */
 #define SETTINGS_DEBOUNCE_NS  3000000000ULL      /* 3 seconds */
 static int s_settings_dirty = 0;
+/* R3.64: one-shot Settings back click requested by physical B. */
+static volatile int s_r364_settings_back_pending = 0;
 static u64 s_settings_tick  = 0;
 
 /* events for this frame */
@@ -117,7 +170,7 @@ static void clamp_settings(void) {
 }
 
 static void settings_path(char *out, size_t n) {
-  snprintf(out, n, "%s/pointer.cfg", s_cfg.data_dir ? s_cfg.data_dir : ".");
+  snprintf(out, n, "%s/pointer_r335.cfg", s_cfg.data_dir ? s_cfg.data_dir : ".");
 }
 
 static void settings_load(void) {
@@ -166,6 +219,14 @@ static void settings_touch(void) {
   s_settings_tick  = armGetSystemTick();
 }
 
+/* Called by android_native_unity when B is pressed while Settings is open.
+ * The actual click is emitted by the next nxp_update(), so it follows the
+ * ordinary nx_pointer -> android_native event path. */
+void nxp_request_settings_back(void) {
+  s_r364_settings_back_pending = 1;
+}
+
+
 /* Called once per frame from nxp_update(). */
 static void settings_tick(void) {
   if (!s_settings_dirty) return;
@@ -188,6 +249,9 @@ static size_t   s_png_len[CURSOR_IMAGES];
 /* decoded */
 static GLuint s_cursor_tex[CURSOR_IMAGES];
 static int    s_cursor_w[CURSOR_IMAGES], s_cursor_h[CURSOR_IMAGES];
+static float  s_cursor_visible_hot_x[CURSOR_IMAGES];
+static float  s_cursor_visible_hot_y[CURSOR_IMAGES];
+static int    s_cursor_visible_hot_valid[CURSOR_IMAGES];
 static int    s_png_tried = 0;      /* decode attempted (success or not) */
 
 static const char *cursor_filename(int which) {
@@ -285,6 +349,30 @@ static int cursor_upload_png(int which) {
   for (png_uint_32 y = 0; y < h; y++) rows[y] = pixels + y * stride;
   png_read_image(png, rows);
   png_read_end(png, NULL);
+
+  /* R3.37: visible-pixel centre for the pressed/aim cursor. */
+  if (which == CURSOR_GRAB) {
+    int min_x = (int)w, min_y = (int)h, max_x = -1, max_y = -1;
+    for (png_uint_32 yy = 0; yy < h; yy++) {
+      const uint8_t *row = pixels + (size_t)yy * stride;
+      for (png_uint_32 xx = 0; xx < w; xx++) {
+        if (row[(size_t)xx * 4 + 3] > 8) {
+          if ((int)xx < min_x) min_x = (int)xx;
+          if ((int)xx > max_x) max_x = (int)xx;
+          if ((int)yy < min_y) min_y = (int)yy;
+          if ((int)yy > max_y) max_y = (int)yy;
+        }
+      }
+    }
+    if (max_x >= min_x && max_y >= min_y) {
+      s_cursor_visible_hot_x[which] = ((float)min_x + (float)max_x + 1.0f) * 0.5f;
+      s_cursor_visible_hot_y[which] = ((float)min_y + (float)max_y + 1.0f) * 0.5f;
+      s_cursor_visible_hot_valid[which] = 1;
+      logf_("nxp: grab visible hotspot=(%.1f,%.1f) alpha-box=%d,%d..%d,%d\n",
+            s_cursor_visible_hot_x[which], s_cursor_visible_hot_y[which],
+            min_x, min_y, max_x, max_y);
+    }
+  }
   png_destroy_read_struct(&png, &info, NULL);
   free(rows);
 
@@ -397,6 +485,62 @@ static void push(int id, float x, float y, int phase) {
   e->id = id; e->x = x; e->y = y; e->phase = phase;
 }
 
+static int any_real_touch_active(void) {
+  const int n = s_cfg.max_touch_slots < 16 ? s_cfg.max_touch_slots : 16;
+  for (int i = 0; i < n; i++)
+    if (s_touch_active[i]) return 1;
+  return 0;
+}
+
+static void edge_pan_stop(void) {
+  if (!s_edge_pan_active) {
+    s_edge_pan_dir = 0;
+    s_edge_pan_frames = 0;
+    return;
+  }
+  push(EDGE_PAN_ID, s_edge_pan_x, s_edge_pan_y, NXP_MOVE);
+  push(EDGE_PAN_ID, s_edge_pan_x, s_edge_pan_y, NXP_UP);
+  s_edge_pan_active = 0;
+  s_edge_pan_dir = 0;
+  s_edge_pan_frames = 0;
+}
+
+static void edge_pan_update(int dir, float analog_mag) {
+  /* The only controller-generated drag allowed in UI:
+   * side navigation on the actual 3-draw level list. */
+  if (g_sz_last_frame_draws != 3) {
+    edge_pan_stop();
+    return;
+  }
+
+  if (analog_mag < 0.0f) analog_mag = -analog_mag;
+  if (analog_mag > 1.0f) analog_mag = 1.0f;
+
+  if (!s_edge_pan_active || s_edge_pan_dir != dir) {
+    if (s_edge_pan_active) edge_pan_stop();
+    s_edge_pan_active = 1;
+    s_edge_pan_dir = dir;
+    s_edge_pan_frames = 0;
+    s_edge_pan_x = s_cfg.screen_w * 0.50f;
+    s_edge_pan_y = s_cfg.screen_h * 0.52f;
+    push(EDGE_PAN_ID, s_edge_pan_x, s_edge_pan_y, NXP_DOWN);
+    return;
+  }
+
+  if (s_edge_pan_frames < 90) s_edge_pan_frames++;
+  const float ramp = (float)s_edge_pan_frames / 90.0f;
+
+  float strength = (analog_mag - 0.35f) / 0.65f;
+  if (strength < 0.0f) strength = 0.0f;
+  if (strength > 1.0f) strength = 1.0f;
+
+  /* R3.47: slightly faster level-list edge scroll (+25% vs R3.46v2).
+   * 5.0 -> 17.5 px/frame instead of 4.0 -> 14.0. */
+  const float speed = (5.0f + 12.5f * ramp) * (0.65f + 0.35f * strength);
+  s_edge_pan_x += (dir > 0) ? -speed : speed;
+  push(EDGE_PAN_ID, s_edge_pan_x, s_edge_pan_y, NXP_MOVE);
+}
+
 /* Touch: the panel always reports in its own space (1280x720) regardless of the
  * resolution we render at, so scale into render space -- otherwise the right and
  * bottom edges (and the corners) are physically unreachable. */
@@ -456,9 +600,29 @@ static void do_touch(void) {
     s_touch_x[i] = x; s_touch_y[i] = y;
   }
   for (int i = 0; i < slots; i++) {
-    if (s_touch_active[i] && !now[i])
-      push(i, s_touch_x[i], s_touch_y[i], NXP_UP);
-    s_touch_active[i] = now[i];
+    if (now[i]) {
+      s_touch_release_wait[i] = 0;
+      s_touch_active[i] = 1;
+      continue;
+    }
+
+    if (s_touch_active[i]) {
+      if (!s_touch_release_wait[i]) {
+        /* First frame after physical release: keep the logical Android pointer
+         * down for one extra 60-Hz frame at exactly the same coordinates. */
+        push(i, s_touch_x[i], s_touch_y[i], NXP_MOVE);
+        s_touch_release_wait[i] = 1;
+        s_touch_active[i] = 1;
+      } else {
+        /* Second absent frame: stationary sample, then final release. */
+        push(i, s_touch_x[i], s_touch_y[i], NXP_MOVE);
+        push(i, s_touch_x[i], s_touch_y[i], NXP_UP);
+        s_touch_release_wait[i] = 0;
+        s_touch_active[i] = 0;
+      }
+    } else {
+      s_touch_release_wait[i] = 0;
+    }
   }
 }
 
@@ -589,6 +753,7 @@ static u64 s_mouse_seen = 0;
 static int s_mouse_logged = 0;
 
 static int do_mouse(void) {
+  s_mouse_activity_this_frame = 0;
   HidMouseState st[16];
   int n = (int)hidGetMouseStates(st, 16);
   if (n <= 0) return 0;
@@ -655,6 +820,13 @@ static int do_mouse(void) {
     logf_("nxp: mouse sensitivity = %.2f\n", s_mouse_sens);
   }
 
+  if (dx || dy || wheel_x || wheel_y || buttons) {
+    s_mouse_activity_this_frame = 1;
+    s_pointer_owner_mouse = 1;
+    s_mouse_idle_frames = 0;
+    s_mouse_auto_hidden = 0;
+  }
+
   if (dx || dy) {
     float dgx, dgy;
     nxp_rot_delta(0, (float)dx * s_mouse_sens, (float)dy * s_mouse_sens, &dgx, &dgy);  /* mouse: no rotation */
@@ -695,19 +867,53 @@ void nxp_update(void) {
   const u64 held    = padGetButtons(&s_pad);
   const u64 pressed = padGetButtonsDown(&s_pad);
 
-  /* '+' toggles the cursor; '-' toggles gyro pointing. */
-  if (s_cursor_unlocked && (pressed & HidNpadButton_Plus)) {
-    s_visible = (s_visible > 0) ? 0 : 1;
-    logf_("nxp: cursor %s\n", s_visible ? "ON" : "OFF");
+  /* R3.70.8: START and nx_pointer use independent PadState instances.
+   * Kill the LOCAL controller-shot state before Pause changes the UI class.
+   * Do NOT emit UP here: android_native_unity's R3.70.7 path sends
+   * ACTION_CANCEL for the live Android pointer before issuing Back. */
+  {
+    const u64 fire_mask =
+      HidNpadButton_A | HidNpadButton_ZR | HidNpadButton_ZL;
+
+    if (pressed & HidNpadButton_Plus) {
+      logf_("[start708] PLUS quarantine tap_prev=%d wait=%d fireheld=0x%llx\n",
+            s_tap_prev, s_cursor_release_wait,
+            (unsigned long long)(held & fire_mask));
+
+      s_tap_prev = 0;
+      s_cursor_release_wait = 0;
+      s_static_ui_press = 0;
+      s_r3708_start_fire_quarantine = 1;
+    }
+
+    /* Keep A/ZR/ZL suppressed only while START itself, or a fire button that
+     * overlapped START, remains physically held. Touch/mouse are untouched. */
+    if (s_r3708_start_fire_quarantine &&
+        !(held & (fire_mask | HidNpadButton_Plus))) {
+      s_r3708_start_fire_quarantine = 0;
+      logf_("[start708] PLUS quarantine RELEASED\n");
+    }
   }
+
+  /* R3.35: PLUS/START is handled as Android Back/Pause. */
+  /* R3.63: SELECT/MINUS toggles the virtual mouse/cursor.
+   * This reuses the wrapper's proven cursor visibility mechanism. */
   if (s_cursor_unlocked && (pressed & HidNpadButton_Minus)) {
+    s_visible = (s_visible > 0) ? 0 : 1;
+    s_mouse_auto_hidden = 0;
+    s_mouse_idle_frames = 0;
+    logf_("nxp: cursor %s (SELECT)\n", s_visible > 0 ? "ON" : "OFF");
+  }
+
+  /* R3.63: R3/right-stick click owns the existing gyro toggle. */
+  if (s_cursor_unlocked && (pressed & HidNpadButton_StickR)) {
     if (s_mouse_connected) {
       logf_("nxp: gyro stays OFF while a mouse is connected\n");
     } else if (!s_gyro_ready) {
       logf_("nxp: gyro unavailable on this controller\n");
     } else {
       s_gyro_on = !s_gyro_on;
-      logf_("nxp: gyro %s\n", s_gyro_on ? "ON" : "OFF");
+      logf_("nxp: gyro %s (R3)\n", s_gyro_on ? "ON" : "OFF");
       if (s_gyro_on && s_visible <= 0) s_visible = 1;   /* pointing needs a cursor */
     }
   }
@@ -726,35 +932,323 @@ void nxp_update(void) {
 
   s_nev = 0;
 
+  if (s_r364_settings_back_pending) {
+    const float bx = (float)s_cfg.panel_w * 0.070f;
+    const float by = (float)s_cfg.panel_h * 0.130f;
+
+    /* Same logical top-left arrow area that works by real touch, but now the
+     * event traverses the normal R3.61 Settings state machine. */
+    push(s_cfg.cursor_id, bx, by, NXP_DOWN);
+    push(s_cfg.cursor_id, bx, by, NXP_UP);
+
+    s_r364_settings_back_pending = 0;
+    logf_("nxp: R3.64 queued Settings back click %.1f,%.1f\n",
+          (double)bx, (double)by);
+  }
+
   if (!docked) do_touch();                 /* touchscreen: handheld only */
 
   /* Mouse first: it sets s_mouse_connected, which gates the gyro below. */
   const int mouse_tap = do_mouse();
+
+  if (s_mouse_connected && s_pointer_owner_mouse) {
+    if (s_mouse_activity_this_frame) {
+      s_mouse_idle_frames = 0;
+      s_mouse_auto_hidden = 0;
+    } else {
+      if (s_mouse_idle_frames < MOUSE_HIDE_FRAMES + 1) s_mouse_idle_frames++;
+      if (s_mouse_idle_frames >= MOUSE_HIDE_FRAMES && !s_tap_prev)
+        s_mouse_auto_hidden = 1;
+    }
+  } else {
+    s_mouse_idle_frames = 0;
+    s_mouse_auto_hidden = 0;
+  }
+
   do_gyro();                               /* no-op if off, or if a mouse is in */
 
   if (s_visible > 0) {
     HidAnalogStickState ls = padGetStickPos(&s_pad, 0);
+    /* R3.34: know whether we are aiming before moving the cursor. */
+    /* R3.56: controller drag is valid only in active gameplay, not the level-entry
+     * High Score/fade nor completed/failed result overlays. */
+    static int s_r356_prev_ui_class = -1;
+    static int s_r356_intro_guard = 0;
+    static int s_r356_play_band_frames = 0;
+    static int s_r356_gameplay_armed = 0;
+    static int s_r356_modal_candidate_frames = 0;
+    static int s_r356_modal_clear_frames = 0;
+    static int s_r356_modal_lock = 0;
+
+    const u64 controller_mask =
+      HidNpadButton_A | HidNpadButton_ZR | HidNpadButton_ZL;
+    const int controller_held =
+      (!s_r3708_start_fire_quarantine && (held & controller_mask)) ? 1 : 0;
+    const int controller_pressed =
+      (!s_r3708_start_fire_quarantine && (pressed & controller_mask)) ? 1 : 0;
+
+    /* R3.46v2:
+     * 2 draws = main menu / STAGES
+     * 3 draws = level list
+     * ONLY controller buttons are made non-draggable on <=3-draw UI.
+     * Touchscreen and mouse keep their original behaviour.
+     */
+    const unsigned long frame_draws = g_sz_last_frame_draws;
+    const int button_static_ui = (frame_draws > 0 && frame_draws <= 3) ? 1 : 0;
+    const int ui_class = (frame_draws <= 2) ? 0 : (frame_draws == 3 ? 1 : 2);
+
+    /* R3.67: a held controller button must never continue across screens.
+     * Pointer reset closes the OLD gesture; quarantine prevents the same
+     * physical hold from creating input on the destination screen. */
+    static int s_r367_prev_ui_class = -1;
+    static int s_r367_hold_quarantine = 0;
+
+    if (ui_class != s_r367_prev_ui_class) {
+      if (s_r367_prev_ui_class >= 0 && controller_held) {
+        s_r367_hold_quarantine = 1;
+
+        if (s_tap_prev) {
+          push(s_cfg.cursor_id, s_cx, s_cy, NXP_MOVE);
+          push(s_cfg.cursor_id, s_cx, s_cy, NXP_MOVE);
+          push(s_cfg.cursor_id, s_cx, s_cy, NXP_UP);
+        }
+
+        s_tap_prev = 0;
+        s_cursor_release_wait = 0;
+        s_static_ui_press = 1;
+
+        logf_("nxp: R3.67 transition quarantine %d->%d held=1\n",
+              s_r367_prev_ui_class, ui_class);
+      }
+
+      s_r367_prev_ui_class = ui_class;
+    }
+
+    if (s_r367_hold_quarantine && !controller_held) {
+      s_r367_hold_quarantine = 0;
+      s_static_ui_press = 0;
+      s_tap_prev = 0;
+      s_cursor_release_wait = 0;
+      logf_("nxp: R3.67 transition quarantine RELEASED\n");
+    }
+
+    /* LEVELS -> DYNAMIC starts with the High Score / black-fade presentation. */
+    if (ui_class != s_r356_prev_ui_class) {
+      if (s_r356_prev_ui_class == 1 && ui_class == 2) {
+        s_r356_intro_guard = 60;
+        s_r356_play_band_frames = 0;
+        s_r356_gameplay_armed = 0;
+        s_r356_modal_candidate_frames = 0;
+        s_r356_modal_clear_frames = 0;
+        s_r356_modal_lock = 0;
+        logf_("nxp: R3.56 level-entry drag guard ON\n");
+      } else if (ui_class != 2) {
+        s_r356_intro_guard = 0;
+        s_r356_play_band_frames = 0;
+        s_r356_gameplay_armed = 0;
+        s_r356_modal_candidate_frames = 0;
+        s_r356_modal_clear_frames = 0;
+        s_r356_modal_lock = 0;
+      }
+      s_r356_prev_ui_class = ui_class;
+    }
+
+    if (ui_class == 2) {
+      if (s_r356_intro_guard > 0)
+        s_r356_intro_guard--;
+
+      if (frame_draws > 0 && frame_draws <= 12 && !s_r356_gameplay_armed)
+        s_r356_intro_guard = 20;
+
+      if (!s_r356_gameplay_armed &&
+          s_r356_intro_guard == 0 &&
+          frame_draws >= 14 && frame_draws <= 19) {
+        if (++s_r356_play_band_frames >= 30) {
+          s_r356_gameplay_armed = 1;
+          s_r356_play_band_frames = 30;
+          logf_("nxp: R3.56 gameplay drag ARMED\n");
+        }
+      }
+
+      if (s_r356_gameplay_armed) {
+        const int modal_draw_pattern =
+          (frame_draws > 0 && (frame_draws <= 13 || frame_draws >= 20)) ? 1 : 0;
+
+        /* R3.57: weighted modal detector.
+         * A Level Cleared / You Failed overlay can oscillate 19/20/21 draws,
+         * so consecutive-frame counting misses it.  Suspicious frames add 2;
+         * ordinary gameplay frames remove only 1. */
+        if (!s_r356_modal_lock) {
+          if (modal_draw_pattern) {
+            if (s_r356_modal_candidate_frames < 20)
+              s_r356_modal_candidate_frames += 2;
+          } else if (s_r356_modal_candidate_frames > 0) {
+            s_r356_modal_candidate_frames--;
+          }
+
+          if (s_r356_modal_candidate_frames >= 4) {
+            s_r356_modal_lock = 1;
+            s_r356_modal_clear_frames = 0;
+            logf_("nxp: R3.57 result-overlay drag guard ON draws=%lu score=%d\n",
+                  frame_draws, s_r356_modal_candidate_frames);
+          }
+        } else {
+          /* Stay click-only until 30 clearly normal gameplay-looking frames.
+           * Result screens therefore cannot inject any held drag/inertia. */
+          if (frame_draws >= 14 && frame_draws <= 19) {
+            if (++s_r356_modal_clear_frames >= 30) {
+              s_r356_modal_lock = 0;
+              s_r356_modal_clear_frames = 0;
+              s_r356_modal_candidate_frames = 0;
+              logf_("nxp: R3.57 result-overlay drag guard OFF\n");
+            }
+          } else {
+            s_r356_modal_clear_frames = 0;
+          }
+        }
+      }
+    }
+
+    if (ui_class != s_last_ui_class) {
+      /* R3.49 containment reset:
+       * When the rendered screen class changes, kill ONLY controller-generated
+       * pointer state before the destination screen can inherit it.
+       *
+       * This does not touch the real touchscreen path. It also deliberately
+       * quarantines A/ZR/ZL until physically released, so holding a shot/click
+       * through a loading transition cannot immediately become a drag on the
+       * next screen.
+       */
+      edge_pan_stop();
+
+      if (controller_held || s_tap_prev) {
+        /* Stationary brake samples + UP. This mirrors the proven controller
+         * release path and gives Unity a zero-velocity end sample. */
+        push(s_cfg.cursor_id, s_cx, s_cy, NXP_MOVE);
+        push(s_cfg.cursor_id, s_cx, s_cy, NXP_MOVE);
+        push(s_cfg.cursor_id, s_cx, s_cy, NXP_UP);
+      }
+
+      s_tap_prev = 0;
+      s_cursor_release_wait = 0;
+      s_static_ui_press = controller_held ? 1 : 0;
+
+      logf_("nxp: UI transition %d->%d reset controller pointer (draws=%lu held=%d)\n",
+            s_last_ui_class, ui_class, frame_draws, controller_held);
+      logf_("nxp: UI class=%s draws=%lu\n",
+            ui_class == 0 ? "STATIC" : (ui_class == 1 ? "LEVELS" : "DYNAMIC"),
+            frame_draws);
+      s_last_ui_class = ui_class;
+    }
+
+    extern int sz_settings_is_open(void);
+
+    /* R3.59: outcome detection no longer uses draw-count guesses. */
+    const int r356_click_only_ui =
+      button_static_ui || sz_settings_is_open() ||
+      (s_r356_intro_guard > 0) ||
+      s_r362_result_visual;
+
+    static int s_r356_prev_click_only = 0;
+    if (r356_click_only_ui && !s_r356_prev_click_only &&
+        (controller_held || s_tap_prev)) {
+      push(s_cfg.cursor_id, s_cx, s_cy, NXP_MOVE);
+      push(s_cfg.cursor_id, s_cx, s_cy, NXP_MOVE);
+      push(s_cfg.cursor_id, s_cx, s_cy, NXP_UP);
+      s_tap_prev = 0;
+      s_cursor_release_wait = 0;
+      s_static_ui_press = controller_held ? 1 : 0;
+    }
+    s_r356_prev_click_only = r356_click_only_ui;
+
+    if (!controller_held)
+      s_static_ui_press = 0;
+
+    if (!s_r367_hold_quarantine &&
+        r356_click_only_ui && controller_pressed && !s_static_ui_press) {
+      /* UI overlays: one complete click only; NEVER a held drag. */
+      push(s_cfg.cursor_id, s_cx, s_cy, NXP_DOWN);
+      push(s_cfg.cursor_id, s_cx, s_cy, NXP_UP);
+      s_static_ui_press = 1;
+    }
+
+    const int controller_drag =
+      (!s_r367_hold_quarantine &&
+       !r356_click_only_ui &&
+       !s_static_ui_press &&
+       controller_held) ? 1 : 0;
+
+    const int tap = controller_drag | mouse_tap;
+    const float aim_speed_scale =
+      (!s_r367_hold_quarantine &&
+       !r356_click_only_ui &&
+       controller_held) ? 0.42f : 1.0f;
+
     if (ls.x || ls.y) {
-      /* panel-space delta (y down): stick +y is up -> -y */
+      s_pointer_owner_mouse = 0;
+      s_mouse_auto_hidden = 0;
+      s_mouse_idle_frames = 0;
+      const float cursor_speed = s_stick_speed * aim_speed_scale;
       float dgx, dgy;
-      nxp_rot_delta(nxp_ctrl_rot(), (ls.x / 32767.0f) * s_stick_speed,
-                    -(ls.y / 32767.0f) * s_stick_speed, &dgx, &dgy);
+      nxp_rot_delta(nxp_ctrl_rot(), (ls.x / 32767.0f) * cursor_speed,
+                    -(ls.y / 32767.0f) * cursor_speed, &dgx, &dgy);
       s_cx += dgx; s_cy += dgy;
       clamp_cursor();
     }
 
     /* A, ZR and ZL all confirm/tap (ZL/ZR let you play one-handed), as does the
      * mouse's left button. */
-    const int tap = ((held & (HidNpadButton_A | HidNpadButton_ZR | HidNpadButton_ZL)) ? 1 : 0)
-                    | mouse_tap;
-    int phase = 0;
-    if      ( tap && !s_tap_prev) phase = NXP_DOWN;
-    else if ( tap &&  s_tap_prev) phase = NXP_MOVE;
-    else if (!tap &&  s_tap_prev) phase = NXP_UP;
-    s_tap_prev = tap;
-    if (phase) push(s_cfg.cursor_id, s_cx, s_cy, phase);
+
+    /* Analog-only edge pan: when the cursor is within the left/right 30%,
+     * pushing the LEFT stick farther toward that side drags the level strip.
+     * Touch and mouse movement never trigger this. */
+    {
+      const float sx = (float)ls.x / 32767.0f;
+      const float edge = (float)s_cfg.screen_w * 0.30f;
+      int pan_dir = 0;
+
+      if (!tap && !any_real_touch_active() && fabsf(sx) >= 0.42f) {
+        if (sx < 0.0f && s_cx <= edge)
+          pan_dir = -1;
+        else if (sx > 0.0f && s_cx >= (float)s_cfg.screen_w - edge)
+          pan_dir = +1;
+      }
+
+      if (pan_dir) edge_pan_update(pan_dir, fabsf(sx));
+      else         edge_pan_stop();
+    }
+    if (tap) {
+      s_cursor_release_wait = 0;
+      if (!s_tap_prev) {
+        push(s_cfg.cursor_id, s_cx, s_cy, NXP_DOWN);
+        s_tap_prev = 1;
+      } else {
+        push(s_cfg.cursor_id, s_cx, s_cy, NXP_MOVE);
+      }
+    } else if (s_tap_prev) {
+      if (s_cursor_release_wait == 0) {
+        s_cursor_release_x = s_cx;
+        s_cursor_release_y = s_cy;
+      }
+      /* Keep visual and Android pointer on one identical fixed point. */
+      s_cx = s_cursor_release_x;
+      s_cy = s_cursor_release_y;
+      if (s_cursor_release_wait < 3) {
+        push(s_cfg.cursor_id, s_cursor_release_x, s_cursor_release_y, NXP_MOVE);
+        s_cursor_release_wait++;
+      } else {
+        push(s_cfg.cursor_id, s_cursor_release_x, s_cursor_release_y, NXP_MOVE);
+        push(s_cfg.cursor_id, s_cursor_release_x, s_cursor_release_y, NXP_UP);
+        s_cursor_release_wait = 0;
+        s_tap_prev = 0;
+      }
+    } else {
+      s_cursor_release_wait = 0;
+    }
   } else {
+    edge_pan_stop();
     s_tap_prev = 0;
+    s_cursor_release_wait = 0;
   }
 
   settings_tick();          /* commits a queued save 3s after the last change */
@@ -887,8 +1381,115 @@ static void attrib_restore(GLuint i, const AttribState *a) {
   else            glDisableVertexAttribArray(i);
 }
 
+
+/* R3.62: framebuffer-based result-screen recognition.
+ *
+ * Detect the actual result UI instead of guessing from draw-call count.
+ * You Failed and Level Cleared share:
+ *   - cyan/teal QUIT button at top-left
+ *   - bright music-circle control at top-right
+ *
+ * We require both corner features and a short temporal confirmation.
+ */
+static void r362_detect_result_visual(void) {
+  GLint vp[4] = {0,0,0,0};
+  glGetIntegerv(GL_VIEWPORT, vp);
+
+  const int vw = vp[2];
+  const int vh = vp[3];
+  if (vw < 320 || vh < 180) {
+    s_r362_result_score = 0;
+    s_r362_result_visual = 0;
+    return;
+  }
+
+  int rw = vw / 10;
+  int rh = vh / 8;
+  if (rw < 48) rw = 48;
+  if (rh < 32) rh = 32;
+  if (rw > 128) rw = 128;
+  if (rh > 96) rh = 96;
+
+  const int pad_x = vw / 50;
+  const int pad_y = vh / 40;
+  const int y  = vp[1] + vh - rh - pad_y;
+  const int lx = vp[0] + pad_x;
+  const int rx = vp[0] + vw - rw - pad_x;
+
+  static unsigned char left_px[128 * 96 * 4];
+  static unsigned char right_px[128 * 96 * 4];
+
+  glReadPixels(lx, y, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, left_px);
+  glReadPixels(rx, y, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, right_px);
+
+  const int n = rw * rh;
+  int teal = 0;
+  int white = 0;
+
+  for (int i = 0; i < n; ++i) {
+    const unsigned char lr = left_px[i*4+0];
+    const unsigned char lg = left_px[i*4+1];
+    const unsigned char lb = left_px[i*4+2];
+
+    if (lg >= 115 && lb >= 75 &&
+        lg >= (int)lr + 25 &&
+        (int)lg + (int)lb >= 230)
+      teal++;
+
+    const unsigned char rr = right_px[i*4+0];
+    const unsigned char rg = right_px[i*4+1];
+    const unsigned char rb = right_px[i*4+2];
+
+    const int rmax =
+      rr > rg ? (rr > rb ? rr : rb) : (rg > rb ? rg : rb);
+    const int rmin =
+      rr < rg ? (rr < rb ? rr : rb) : (rg < rb ? rg : rb);
+
+    if (rr >= 175 && rg >= 175 && rb >= 175 && (rmax - rmin) <= 55)
+      white++;
+  }
+
+  const int teal_hit  = (teal  * 100 >= n * 4);
+  const int white_hit = (white * 100 >= n * 1);
+  const int hit = teal_hit && white_hit;
+
+  if (hit) {
+    if (s_r362_result_score < 8)
+      s_r362_result_score += 2;
+  } else {
+    if (s_r362_result_score > 0)
+      s_r362_result_score -= 1;
+  }
+
+  const int old = s_r362_result_visual;
+
+  if (!old && s_r362_result_score >= 4)
+    s_r362_result_visual = 1;
+  else if (old && s_r362_result_score <= 1)
+    s_r362_result_visual = 0;
+
+  if (old != s_r362_result_visual) {
+    logf_("nxp: R3.62 result visual %s teal=%d white=%d n=%d\n",
+          s_r362_result_visual ? "ON" : "OFF",
+          teal, white, n);
+  }
+}
+
+/* R3.70.21: keep pause/result visual recognition alive even when the
+ * virtual cursor itself is hidden. This must be called with Unity's GL
+ * context current, immediately before nxp_draw(). */
+void nxp_r362_visual_poll(void) {
+  r362_detect_result_visual();
+}
+
 void nxp_draw(void) {
-  if (!s_ready || s_visible <= 0) return;
+  static int s_r357_menu_seen = 0;
+  if (!s_r357_menu_seen &&
+      (g_sz_last_frame_draws == 2 || g_sz_last_frame_draws == 3)) {
+    s_r357_menu_seen = 1;
+    logf_("nxp: R3.57 menu reached -> cursor visible with menu/music\n");
+  }
+  if (!s_r357_menu_seen || !s_ready || s_visible <= 0 || s_mouse_auto_hidden) return;
   if (!gl_init()) return;
 
   /* Decode + upload both standalone cursor states on first post-startup draw
@@ -952,8 +1553,14 @@ void nxp_draw(void) {
      * jumping upward when A/ZL/ZR is pressed. */
     const GLfloat w = (GLfloat)s_cursor_w[cursor_kind];
     const GLfloat h = (GLfloat)s_cursor_h[cursor_kind];
-    const GLfloat hot_x = w * (cursor_kind == CURSOR_GRAB ? 0.32f : 0.36f);
-    const GLfloat hot_y = h * 0.10f;
+    const GLfloat hot_x =
+      (cursor_kind == CURSOR_GRAB && s_cursor_visible_hot_valid[CURSOR_GRAB])
+        ? (GLfloat)s_cursor_visible_hot_x[CURSOR_GRAB]
+        : ((cursor_kind == CURSOR_GRAB) ? (w * 0.50f) : (w * 0.36f));
+    const GLfloat hot_y =
+      (cursor_kind == CURSOR_GRAB && s_cursor_visible_hot_valid[CURSOR_GRAB])
+        ? (GLfloat)s_cursor_visible_hot_y[CURSOR_GRAB]
+        : ((cursor_kind == CURSOR_GRAB) ? (h * 0.50f) : (h * 0.10f));
     const GLfloat quad[] = {
       -hot_x,    -hot_y,  w-hot_x,    -hot_y,
       -hot_x, h-hot_y,    w-hot_x, h-hot_y

@@ -1,150 +1,169 @@
-<div align="center">
+# Stupid Zombies NX
 
-<img src="reloaded.jpg" alt="abreloaded_nx" width="160">
+**Stupid Zombies 3.4.5 port for Nintendo Switch**
 
-# abreloaded_nx
+Stupid Zombies NX is a native Nintendo Switch wrapper/port of the Android ARM64 version of **Stupid Zombies 3.4.5**.
 
-**Angry Birds Reloaded on Nintendo Switch**
+It loads the original game's ARM64 Unity libraries and runs them on Nintendo Switch through a lightweight Android/JNI compatibility layer.
 
-An unofficial Nintendo Switch wrapper for the Android version of
-**Angry Birds Reloaded**.
+Current port version: **R3.70.23**
 
-[![Switch](https://img.shields.io/badge/Nintendo_Switch-Homebrew-E60012?style=for-the-badge&logo=nintendoswitch&logoColor=white)](#)
-[![Version](https://img.shields.io/badge/Version-1.0.0-4C8BF5?style=for-the-badge)](#)
-[![Unity](https://img.shields.io/badge/Unity-2022.3.7f1-222C37?style=for-the-badge&logo=unity&logoColor=white)](#)
+Target game:
 
-</div>
+- Stupid Zombies 3.4.5
+- Package: `com.gameresort.stupidzombies`
+- Android ARM64 (`arm64-v8a`)
+- Unity 2022.3.19f1
+- IL2CPP
 
----
+## Installation
 
-## About
+You need a **legally obtained copy of Stupid Zombies 3.4.5 for Android**.
 
-`abreloaded_nx` is a native wrapper that runs the ARM64 Android build of
-**Angry Birds Reloaded** on Nintendo Switch. It recreates the Android and JNI
-services expected by the game under Horizon OS.
+The original game files are **not included** in this repository or in the releases.
 
-This release targets **Angry Birds Reloaded 2.2.16218**, built with
-**Unity 2022.3.7f1**, IL2CPP and ARM64.
+### Automatic setup
 
-The repository does not include the game, APK, libraries or assets. You must
-provide your own legally obtained copy.
-
----
-
-## Controls
-
-| Input | Action |
-| --- | --- |
-| **Touchscreen** | Native touch controls |
-| **Left Stick** | Move the cursor |
-| **A / ZL / ZR** | Tap or drag |
-| **B** | Back |
-| **L / R** | Recenter the cursor |
-| **+** | Show or hide the cursor |
-| **–** | Enable or disable gyro aiming |
-| **D-Pad Up / Down** | Adjust cursor sensitivity |
-
-A USB mouse can also move the cursor and click. Cursor settings are saved in
-`pointer.cfg`.
-
----
-
-## Build
-
-### Requirements
-
-* devkitPro
-* devkitA64 and libnx
-* Switch Mesa and libdrm_nouveau
-* Switch SDL2, zlib and libpng
-* GNU Make
-
-Install the required devkitPro packages:
+Use the included preparation script:
 
 ```bash
-pacman -S switch-dev switch-mesa switch-libdrm_nouveau switch-sdl2 switch-zlib switch-libpng
+python3 tools/prepare_sd.py \
+  /path/to/stupid-zombies-3-4-5.apk \
+  /path/to/SD \
+  --nro /path/to/stupidzombies_nx.nro
 ```
 
-Compile the wrapper:
-
-```bash
-cd abreloaded_nx
-make -j
-```
-
-For a clean rebuild:
-
-```bash
-make clean
-make -j
-```
-
----
-
-## Running
-
-Extract the Android game files from your own APK and create this folder on the
-SD card:
+The resulting installation should look like this:
 
 ```text
-sd:/switch/abreloaded/
-├── abreloaded_nx.nro
+sd:/switch/stupidzombies/
+├── stupidzombies_nx.nro
 ├── libmain.so
 ├── libunity.so
 ├── libil2cpp.so
 ├── cursor_pointer.png
 ├── cursor_grab.png
 └── assets/
+    └── bin/
+        └── Data/
+            └── ...
 ```
 
-The three libraries are found in `lib/arm64-v8a/` inside the APK. Copy the
-complete `assets/` directory without changing its layout.
+The following files come from your original Stupid Zombies APK:
 
-Launch the NRO through title override for full application memory: hold **R**
-while opening an installed game, then start `abreloaded_nx` from the Homebrew
-Menu.
+```text
+libmain.so
+libunity.so
+libil2cpp.so
+assets/bin/Data/
+```
 
----
+They are not distributed by this project.
 
-## Status
+### Verify your APK
 
-Gameplay, assets, audio, cutscenes, touchscreen input and controller cursor
-input are working. Startup and scene transitions can still take longer than on
-the original platforms.
+The included checker can verify that the APK matches the supported version:
 
-The wrapper is built specifically for game version **2.2.16218**. Libraries
-from another release may require different patches and are not supported.
+```bash
+python3 tools/check_apk.py /path/to/stupid-zombies-3-4-5.apk
+```
 
----
+## Launching
+
+Stupid Zombies NX requires the full Nintendo Switch application memory pool.
+
+Do **not** launch it in Homebrew Menu applet/album mode.
+
+Use title override by holding **R** while launching a game, then start Stupid Zombies NX from the Homebrew Menu.
+
+A forwarder with full application memory can also be used.
+
+## Controls
+
+| Control | Action |
+|---|---|
+| Left Stick | Move cursor / aim |
+| R3 | Enable / disable gyroscope aiming |
+| Gyroscope | Fine aiming while enabled |
+| A | Touch / fire |
+| ZR / ZL | Touch / fire |
+| Minus (-) | Show / hide cursor |
+| Plus (+) | Pause / resume |
+
+The game remains based on its original touch interface, with Nintendo Switch controls and gyroscope input translated by the wrapper.
+
+## Building
+
+You need devkitPro/devkitA64 and the required Nintendo Switch homebrew libraries.
+
+Required packages include:
+
+- libnx
+- switch-mesa
+- switch-libdrm_nouveau
+- switch-sdl2
+- zlib
+- libpng
+
+Build with:
+
+```bash
+make clean
+make -j
+```
+
+The resulting executable is:
+
+```text
+stupidzombies_nx.nro
+```
+
+## Debugging
+
+A debug log may be generated at:
+
+```text
+sd:/switch/stupidzombies/debug.log
+```
+
+It can be inspected using:
+
+```bash
+python3 tools/analyze_debug_log.py debug.log
+```
+
+## Known issues
+
+The port is considered playable and stable.
+
+- Minor input/cursor edge cases may still occur with unusual combinations of inputs.
+- In some situations, the background may move slightly due to the way the original touch movement is translated to controller input. This is only a minor visual issue and does not affect gameplay.
+
+If you encounter a reproducible problem, please include the relevant `debug.log` when opening an issue.
 
 ## Credits
 
-**Angry Birds Reloaded Nintendo Switch port** — aks796
+Stupid Zombies NX was developed from and heavily adapted from the open-source Nintendo Switch Android `.so` loader ecosystem.
 
-**Fruit Ninja Classic+ Nintendo Switch port and base wrapper** — ChanseyIsTheBest
+Special thanks to:
 
-The loader and compatibility layer derive from the open-source Switch `.so`
-loader work by Andy Nguyen, fgsfds and ChanseyIsTheBest, building on
-TheOfficialFloW's Vita and Switch loader work. This project also draws from the
-Zookeeper DX, PvZ Fusion and Animal Crossing: Pocket Camp ports. The inherited
-wrapper code is MIT-licensed.
+- [aks796/abreloaded_nx](https://github.com/aks796/abreloaded_nx) for the wrapper base used during development
+- Andy Nguyen
+- fgsfds
+- TheOfficialFloW
+- Zookeeper DX port contributors
+- Very Little Nightmares port contributors
+- PvZ Fusion NX port contributors
+- devkitPro and libnx contributors
 
-**Angry Birds Reloaded** was developed and published by Rovio Entertainment.
+## Legal
 
----
+This project is not affiliated with or endorsed by GameResort.
 
-## Contributing
+**Stupid Zombies**, its program code, graphics, audio, assets and other original game content are property of their respective copyright holders.
 
-Bug reports and tested improvements are welcome. Include the build version,
-steps to reproduce and the relevant `debug.log` when reporting an issue.
+No original Stupid Zombies game code or assets are distributed in this repository.
 
----
+Users must provide the required files from their own legally obtained copy of Stupid Zombies 3.4.5.
 
-## Disclaimer
-
-This is an unofficial fan project and is not affiliated with, sponsored by or
-endorsed by Rovio Entertainment. Angry Birds Reloaded and all related artwork,
-audio, trademarks and game assets belong to their respective owners.
-
-This repository contains only the compatibility code required by the Nintendo
-Switch port and does not distribute proprietary game files.
+The source code specific to this project and the inherited open-source wrapper code are provided under the terms of the accompanying MIT License.

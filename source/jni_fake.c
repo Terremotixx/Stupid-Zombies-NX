@@ -13,6 +13,7 @@
 #include <time.h>
 #include <switch.h>
 
+#include <setjmp.h>
 #include "config.h"
 #include "util.h"
 #include "jni_fake.h"
@@ -31,6 +32,7 @@
 typedef uint64_t juint;
 
 void fmod_audio_start(void); // defined below; launched from FMODAudioDevice.start()
+void fmod_audio_stop(void);
 
 // ---------------------------------------------------------------------------
 // fake object model
@@ -54,6 +56,7 @@ typedef struct { uint32_t tag; char cls[96]; char name[64]; char sig[160]; } Fak
 typedef struct { uint32_t tag; char name[96]; } FakeClass;
 
 volatile int jni_quit_requested = 0;
+
 
 /* Read a fake-object tag without trusting the pointer.
  * Returns 0 for anything that cannot be one of ours: NULL, misaligned
@@ -258,6 +261,8 @@ void *jni_make_object(const char *label) {
   return r;
 }
 
+
+
 void *jni_make_string(const char *utf) {
   const char *u = utf ? utf : "";
   mutexLock(&locals_lock);
@@ -340,18 +345,45 @@ static void *reg_bitmap(FakeBitmap *b) { return reg_local(b); }
 static FakeClass class_pool[MAX_CLASSES];
 static int class_count = 0;
 
+/* R321_JNI_META_LOCK
+ * Unity resolves JNI classes/methods from several worker threads during
+ * startup. class_pool/class_count and id_pool/id_count are shared globals.
+ * Publishing a slot via count++ before it is fully written lets another
+ * thread observe or reuse partially-written metadata.
+ */
+static Mutex jni_meta_lock;
+
 static void *intern_class(const char *name) {
-  for (int i = 0; i < class_count; i++)
-    if (!strcmp(class_pool[i].name, name))
-      return &class_pool[i];
-  if (class_count >= MAX_CLASSES) {
-    debugPrintf("JNI: *** class pool exhausted at '%s' -> collapsing to '%s' "
-                "(distinct classes break instanceof!)\n", name, class_pool[0].name);
-    return &class_pool[0];
+  if (!name) name = "";
+
+  mutexLock(&jni_meta_lock);
+
+  for (int i = 0; i < class_count; i++) {
+    if (!strcmp(class_pool[i].name, name)) {
+      FakeClass *hit = &class_pool[i];
+      mutexUnlock(&jni_meta_lock);
+      return hit;
+    }
   }
-  FakeClass *c = &class_pool[class_count++];
+
+  if (class_count >= MAX_CLASSES) {
+    FakeClass *fallback = &class_pool[0];
+    mutexUnlock(&jni_meta_lock);
+    debugPrintf("JNI: *** class pool exhausted at '%s' -> collapsing to '%s' "
+                "(distinct classes break instanceof!)\n",
+                name, fallback->name);
+    return fallback;
+  }
+
+  /* Fill the complete object first; publish it by incrementing class_count last. */
+  FakeClass *c = &class_pool[class_count];
   c->tag = TAG_CLASS;
   strncpy(c->name, name, sizeof(c->name) - 1);
+  c->name[sizeof(c->name) - 1] = 0;
+  class_count++;
+
+  mutexUnlock(&jni_meta_lock);
+
   debugPrintf("JNI class: %s\n", c->name);
   return c;
 }
@@ -474,22 +506,38 @@ static FakeID *get_id(const char *cls_in, const char *name_in, const char *sig_i
   const char *cls  = safe_cstr(cls_in,  "cls");
   const char *name = safe_cstr(name_in, "name");
   const char *sig  = safe_cstr(sig_in,  "sig");
-  for (int i = 0; i < id_count; i++)
+
+  mutexLock(&jni_meta_lock);
+
+  for (int i = 0; i < id_count; i++) {
     if (!strcmp(id_pool[i].name, name) && !strcmp(id_pool[i].sig, sig) &&
-        !strcmp(id_pool[i].cls, cls))
-      return &id_pool[i];
-  if (id_count >= MAX_IDS) {
-    debugPrintf("JNI: id pool exhausted (%s.%s)\n", cls, name);
-    return &id_pool[0];
+        !strcmp(id_pool[i].cls, cls)) {
+      FakeID *hit = &id_pool[i];
+      mutexUnlock(&jni_meta_lock);
+      return hit;
+    }
   }
-  FakeID *id = &id_pool[id_count++];
+
+  if (id_count >= MAX_IDS) {
+    FakeID *fallback = &id_pool[0];
+    mutexUnlock(&jni_meta_lock);
+    debugPrintf("JNI: id pool exhausted (%s.%s)\n", cls, name);
+    return fallback;
+  }
+
+  /* Do NOT expose this slot through id_count until every field is complete. */
+  FakeID *id = &id_pool[id_count];
   id->tag = TAG_ID;
   strncpy(id->cls, cls, sizeof(id->cls) - 1);
   strncpy(id->name, name, sizeof(id->name) - 1);
   strncpy(id->sig, sig, sizeof(id->sig) - 1);
   id->cls[sizeof(id->cls) - 1] = 0;
   id->name[sizeof(id->name) - 1] = 0;
-  id->sig[sizeof(id->sig) - 1] = 0;   /* strncpy does NOT terminate on truncation */
+  id->sig[sizeof(id->sig) - 1] = 0;
+  id_count++;
+
+  mutexUnlock(&jni_meta_lock);
+
   debugPrintf("JNI id: %s.%s %s\n", id->cls, id->name, id->sig);
   return id;
 }
@@ -775,6 +823,8 @@ static void deliver_doframe(void *cb) {
 #define RUNQ_N 1024
 static void *g_runq[RUNQ_N]; static int g_runq_kind[RUNQ_N]; static int g_runq_head = 0, g_runq_tail = 0;
 static Mutex g_runq_lk; static CondVar g_runq_cv; static int g_runq_started = 0;
+static volatile int g_runq_stop = 0;
+static int g_runq_thread_live = 0;
 static CondVar g_runq_space;              /* signalled when a slot frees */
 static __thread int g_in_drain;           /* set on the drain thread only */
 static unsigned g_runq_dropped, g_runq_waited, g_runq_hiwater;
@@ -791,9 +841,19 @@ static void run_drain_thread(void *arg) {
   g_in_drain = 1;                          /* never block this thread on post */
   for (;;) {
     mutexLock(&g_runq_lk);
+    if (g_runq_stop) {
+      g_frame_cb = 0;
+      mutexUnlock(&g_runq_lk);
+      break;
+    }
     if (g_runq_head == g_runq_tail) {
       if (g_frame_cb) condvarWaitTimeout(&g_runq_cv, &g_runq_lk, ABR_VSYNC_PERIOD_NS); /* vsync tick */
       else            condvarWait(&g_runq_cv, &g_runq_lk);
+    }
+    if (g_runq_stop) {
+      g_frame_cb = 0;
+      mutexUnlock(&g_runq_lk);
+      break;
     }
     void *o = 0; int k = 0, have = 0;
     if (g_runq_head != g_runq_tail) {
@@ -813,8 +873,10 @@ static void runq_post(void *obj, int kind) {
   mutexLock(&g_runq_lk);
   if (!g_runq_started) {
     g_runq_started = 1;
-    if (R_SUCCEEDED(threadCreate(&g_runq_thr, run_drain_thread, NULL, NULL, 0x8000, 0x2C, -2)))
-      threadStart(&g_runq_thr);
+    g_runq_stop = 0;
+    Result _runqrc = threadCreate(&g_runq_thr, run_drain_thread, NULL, NULL, 0x8000, 0x2C, -2);
+    if (R_SUCCEEDED(_runqrc) && R_SUCCEEDED(threadStart(&g_runq_thr)))
+      g_runq_thread_live = 1;
   }
   int nt = (g_runq_tail + 1) % RUNQ_N;
   /* Full: wait for the drain thread to free a slot rather than discard the
@@ -846,6 +908,24 @@ static void runq_post(void *obj, int kind) {
   condvarWakeOne(&g_runq_cv);
   mutexUnlock(&g_runq_lk);
 }
+/* SZ_R313_RUNQ_STOP */
+void jni_runq_shutdown(void) {
+  if (!g_runq_started) return;
+  mutexLock(&g_runq_lk);
+  g_runq_stop = 1;
+  g_frame_cb = 0;
+  condvarWakeOne(&g_runq_cv);
+  condvarWakeOne(&g_runq_space);
+  mutexUnlock(&g_runq_lk);
+  if (g_runq_thread_live) {
+    threadWaitForExit(&g_runq_thr);
+    threadClose(&g_runq_thr);
+    g_runq_thread_live = 0;
+  }
+  g_runq_started = 0;
+  debugPrintf("[quitthr] JNI run queue stopped\n");
+}
+
 static void post_runnable(void *runnable) { runq_post(runnable, 0); }
 static void post_message(void) { runq_post(g_last_proxy, 1); }
 static int g_msg_what = 0;   /* captured from Handler.obtainMessage(what) for msg.what reads */
@@ -1510,6 +1590,40 @@ static void log_app_upcall(const FakeID *id) {
 
 static void *dispatch_object(void *recv, const FakeID *id, va_list va) {
   jni_approx_arm();
+  /* SZ_R351_IAP_OBJECT_BEGIN */
+  if (name_has(id->cls, "billingclient/api/BillingClient") &&
+      !strcmp(id->name, "newBuilder")) {
+    debugPrintf("[iap351] BillingClient.newBuilder -> fake Builder\n");
+    return jni_make_object("com/android/billingclient/api/BillingClient$Builder");
+  }
+
+  if (name_has(id->cls, "BillingClient$Builder")) {
+    if (!strcmp(id->name, "build")) {
+      debugPrintf("[iap351] BillingClient.Builder.build -> fake BillingClient\n");
+      return jni_make_object("com/android/billingclient/api/BillingClient");
+    }
+    return recv ? recv
+                : jni_make_object("com/android/billingclient/api/BillingClient$Builder");
+  }
+
+  if (name_has(id->cls, "PendingPurchasesParams") &&
+      !strcmp(id->name, "newBuilder"))
+    return jni_make_object("com/android/billingclient/api/PendingPurchasesParams$Builder");
+
+  if (name_has(id->cls, "PendingPurchasesParams$Builder")) {
+    if (!strcmp(id->name, "build"))
+      return jni_make_object("com/android/billingclient/api/PendingPurchasesParams");
+    return recv ? recv
+                : jni_make_object("com/android/billingclient/api/PendingPurchasesParams$Builder");
+  }
+
+  if (name_has(id->cls, "BillingResult") &&
+      !strcmp(id->name, "getDebugMessage"))
+    return jni_make_string("Billing unavailable on Nintendo Switch");
+  /* SZ_R351_IAP_OBJECT_END */
+
+
+
   log_app_upcall(id);
   /* MotionEvent.obtain(MotionEvent): copy factory. The engine copies our
    * injected event and reads the copy after inject returns; return a real
@@ -1625,6 +1739,18 @@ static void *dispatch_object(void *recv, const FakeID *id, va_list va) {
 }
 static juint dispatch_int(void *recv, const FakeID *id, va_list va) {
   jni_approx_arm();
+  /* SZ_R351_IAP_INT_BEGIN */
+  if (name_has(id->cls, "BillingResult") &&
+      !strcmp(id->name, "getResponseCode")) {
+    debugPrintf("[iap351] BillingResult.getResponseCode -> BILLING_UNAVAILABLE(3)\n");
+    return 3;
+  }
+  if (name_has(id->cls, "billingclient/api/BillingClient") &&
+      !strcmp(id->name, "isReady"))
+    return 0;
+  /* SZ_R351_IAP_INT_END */
+
+
   log_app_upcall(id);
   // java.lang.String instance methods reached via CallIntMethod (Unity's
   // java::lang::String::length() does this to size path buffers). The receiver
@@ -1665,13 +1791,70 @@ static juint dispatch_int(void *recv, const FakeID *id, va_list va) {
 }
 static float dispatch_float(void *recv, const FakeID *id, va_list va) {
   jni_approx_arm();
+  if (!strcmp(id->name, "getFloat") &&
+      strstr(id->sig, "(Ljava/lang/String;F)F"))
+    return unity_dispatch_float(recv, id, va);
   if (unity_is_boxed(recv)) return unity_boxed_float(recv);   /* Float.floatValue */
   if (input_owns_recv(recv)) return input_dispatch_float(recv, id, va);
   if (input_owns_class(id->cls)) return input_dispatch_float(recv, id, va);
   return act_float(id, va);
 }
+
+
+
+/* SZ_R351_IAP_CALLBACK_BEGIN */
+static void sz_r351_iap_fail_setup(void *listener) {
+  if (!listener) {
+    debugPrintf("[iap351] startConnection: NULL listener\n");
+    return;
+  }
+
+  FakeObjArray *args = (FakeObjArray *)calloc(1, sizeof(*args));
+  if (!args) return;
+  args->items = (void **)calloc(1, sizeof(void *));
+  if (!args->items) { free(args); return; }
+
+  args->tag = TAG_OBJARR;
+  args->len = 1;
+  args->items[0] = jni_make_object("com/android/billingclient/api/BillingResult");
+
+  void *cls = intern_class("com/android/billingclient/api/BillingClientStateListener");
+  FakeID *mid = get_id("com/android/billingclient/api/BillingClientStateListener",
+                       "onBillingSetupFinished",
+                       "(Lcom/android/billingclient/api/BillingResult;)V");
+
+  debugPrintf("[iap351] startConnection -> onBillingSetupFinished(BILLING_UNAVAILABLE)\n");
+  proxy_invoke(listener, cls, mid, args);
+}
+/* SZ_R351_IAP_CALLBACK_END */
+
 static void dispatch_void(void *recv, const FakeID *id, va_list va) {
+  /* SZ_R351_IAP_VOID_BEGIN */
+  if (!strcmp(id->name, "startConnection") && name_has(id->cls, "billingclient")) {
+    void *listener = va_arg(va, void *);
+    sz_r351_iap_fail_setup(listener);
+    return;
+  }
+  if (!strcmp(id->name, "endConnection") && name_has(id->cls, "billingclient")) {
+    debugPrintf("[iap351] BillingClient.endConnection -> no-op\n");
+    return;
+  }
+  /* SZ_R351_IAP_VOID_END */
+
+  /* SZ_R36_ENDUNITYLAUNCH_LATE_GUARD
+   * Normally unreachable after the nativeRender()==0 fix. If Unity reaches
+   * this callback through another path, request wrapper exit without killing
+   * the process and without longjmp.
+   */
+  if (name_has(id->cls, "ReflectionHelper") &&
+      !strcmp(id->name, "endUnityLaunch")) {
+    debugPrintf("[quit] late endUnityLaunch guard -> exit requested\n");
+    jni_quit_requested = 1;
+    return;
+  }
+
   jni_approx_arm();
+
   log_app_upcall(id);
   if (name_has(id->cls, "FMODAudioDevice")) {
     debugPrintf("[fmod] FMODAudioDevice.%s() CALLED\n", id->name);
@@ -1681,7 +1864,11 @@ static void dispatch_void(void *recv, const FakeID *id, va_list va) {
      * source (Data Abort at +0x28), confirmed even after a 120-frame warmup.
      * Pump left in the tree but disabled; audio is moving to FMOD OutputOpenSL
      * (Path B), which FMOD drives natively via opensles.c. */
-    if (0 && !strcmp(id->name, "start")) fmod_audio_start();
+    if (!strcmp(id->name, "start")) {
+      fmod_audio_start();
+    } else if (!strcmp(id->name, "stop") || !strcmp(id->name, "close")) {
+      fmod_audio_stop();
+    }
   }
   if (unity_owns_class(id->cls)) { unity_dispatch_void(recv, id, va); return; }
   if (is_mov(id->cls)) { mov_void(id, va); return; }
@@ -1986,6 +2173,18 @@ static uint64_t j_CallLongMethodA(void *e, void *r, FakeID *id, const void *a){
   JVA_N(); JVA_DISPATCH(return, j_CallLongMethod, e, r, id);
 }
 static float j_CallFloatMethodA  (void *e, void *r, FakeID *id, const void *a){
+  /* R3.22: SharedPreferences.getFloat(String,float) through AndroidJNISafe uses
+   * CallFloatMethodA. Each jvalue slot is 8 bytes; jfloat occupies the low
+   * 32 bits on this little-endian target. */
+  if (a && !strcmp(id->name, "getFloat") &&
+      strstr(id->sig, "(Ljava/lang/String;F)F")) {
+    const uint64_t *jv = (const uint64_t *)a;
+    void *key = (void *)(uintptr_t)jv[0];
+    uint32_t bits = (uint32_t)jv[1];
+    float def = 0.0f;
+    memcpy(&def, &bits, sizeof def);
+    return unity_prefs_get_float_jvalue(key, def);
+  }
   /* MotionEvent.getX(I)F / getY(I)F reach us here, and forwarding to the varargs
    * version discards the jvalue array -- so the pointer index was read from an
    * empty va_list, clamped to 0, and every finger reported pointer 0's position.
@@ -2636,153 +2835,258 @@ static void *j_ExceptionOccurred(void *env) { (void)env; return NULL; }
 static void j_void1(void *env) { (void)env; }
 
 // ---------------------------------------------------------------------------
-// FMOD native-audio pump
+// FMOD native-audio pump -- SZ R3.48 FIXED
 // ---------------------------------------------------------------------------
-// fmodProcess(env, this, ByteBuffer) renders one fixed-size FMOD mixer block
-// (size comes from the output singleton set up at start(), NOT from the buffer
-// capacity) straight into env->GetDirectBufferAddress(ByteBuffer), then returns
-// 0. We have no JVM, so the Java FMODAudioDevice.run() loop never calls it --
-// this native thread does instead, and pushes the PCM to the SDL sink.
+// Mirrors Android FMODAudioDevice.run():
+//   info[0] = sample rate
+//   info[1] = DSP block length (frames)
+//   info[2] = DSP buffer count
+//   info[3] = ready/running flag
+//   info[4] = channel count
 //
-// The only JNIEnv entry fmodProcess uses is GetDirectBufferAddress (slot 230);
-// fmodGetInfo(which) uses none. So the shim only has to hand back our staging
-// buffer and feed the captured function pointers a non-NULL `this`/buffer token.
+// Critical Switch fix: this pthread installs its OWN Bionic TLS before calling
+// any libunity FMOD native. The older test entered libunity from a plain pthread.
 
-#define FMOD_STAGING_BYTES (64 * 1024)   // generous: must exceed one mixer block
+#define FMOD_STAGING_BYTES (64 * 1024)
 static unsigned char g_fmod_staging[FMOD_STAGING_BYTES];
-static int  g_fmod_bb_token   = 0;       // stand-in jobject for the ByteBuffer
-static int  g_fmod_this_token = 0;       // stand-in jobject for `this`
-static int  g_fmod_started    = 0;
+static int g_fmod_bb_token = 0;
+static int g_fmod_this_token = 0;
+static volatile int g_fmod_started = 0;
+static volatile int g_fmod_stop = 0;
+/* R3.70.3 visual handoff state:
+ *   0 = FMOD startup pending
+ *   1 = output opened / ready
+ *  -1 = unavailable/aborted
+ */
+static volatile int g_fmod_loader_state = 0;
+static pthread_t g_fmod_thread;
+
+int fmod_audio_loader_ready(void) {
+  return g_fmod_loader_state != 0;
+}
 
 typedef int (*fmod_getinfo_fn)(void *env, void *thiz, int which);
 typedef int (*fmod_process_fn)(void *env, void *thiz, void *bytebuffer);
 
-// slot 230: every ByteBuffer we ever pass is our own staging buffer.
+enum {
+  FMOD_INFO_RATE = 0,
+  FMOD_INFO_BLOCK_FRAMES = 1,
+  FMOD_INFO_BUFFER_COUNT = 2,
+  FMOD_INFO_READY = 3,
+  FMOD_INFO_CHANNELS = 4,
+  FMOD_INFO_COUNT = 5
+};
+
 static void *j_GetDirectBufferAddress(void *env, void *buf) {
-  (void)env; (void)buf; return g_fmod_staging;
+  (void)env; (void)buf;
+  return g_fmod_staging;
 }
-// slot 231 (defensive -- the disasm shows fmodProcess never calls it).
+
 static long j_GetDirectBufferCapacity(void *env, void *buf) {
-  (void)env; (void)buf; return (long)FMOD_STAGING_BYTES;
+  (void)env; (void)buf;
+  return (long)FMOD_STAGING_BYTES;
 }
 
-// Discover how many bytes fmodProcess actually wrote, once, by sentinel-fill.
-// Silence (0x0000) still differs from the 0xCD fill, so a silent first block is
-// detected correctly.
-static int probe_block_bytes(fmod_process_fn process, int frame_bytes) {
-  memset(g_fmod_staging, 0xCD, FMOD_STAGING_BYTES);
-  process(fake_env, &g_fmod_this_token, &g_fmod_bb_token);
-  int last = -1;
-  for (int i = FMOD_STAGING_BYTES - 1; i >= 0; i--) {
-    if (g_fmod_staging[i] != 0xCD) { last = i; break; }
-  }
-  if (last < 0) return 0;
-  int bytes = last + 1;
-  if (frame_bytes > 0)                    // round up to a whole frame
-    bytes = ((bytes + frame_bytes - 1) / frame_bytes) * frame_bytes;
-  if (bytes > FMOD_STAGING_BYTES) bytes = FMOD_STAGING_BYTES;
-  return bytes;
-}
-
-static int16_t block_peak(int bytes) {
-  const int16_t *s = (const int16_t *)g_fmod_staging;
-  int n = bytes / 2; int16_t peak = 0;
+static int fmod_peak_s16(int bytes) {
+  const int16_t *p = (const int16_t *)g_fmod_staging;
+  const int n = bytes / (int)sizeof(int16_t);
+  int peak = 0;
   for (int i = 0; i < n; i++) {
-    int16_t v = s[i] < 0 ? (int16_t)-s[i] : s[i];
+    int v = p[i];
+    if (v < 0) v = -v;
     if (v > peak) peak = v;
   }
   return peak;
 }
 
+static int fmod_info_valid(const int v[FMOD_INFO_COUNT]) {
+  if (v[FMOD_INFO_RATE] < 8000 || v[FMOD_INFO_RATE] > 192000) return 0;
+  if (v[FMOD_INFO_BLOCK_FRAMES] <= 0 || v[FMOD_INFO_BUFFER_COUNT] <= 0) return 0;
+  if (v[FMOD_INFO_READY] != 1) return 0;
+  if (v[FMOD_INFO_CHANNELS] != 1 &&
+      v[FMOD_INFO_CHANNELS] != 2 &&
+      v[FMOD_INFO_CHANNELS] != 6) return 0;
+
+  size_t bytes = (size_t)v[FMOD_INFO_BLOCK_FRAMES] *
+                 (size_t)v[FMOD_INFO_CHANNELS] *
+                 sizeof(int16_t);
+  return bytes > 0 && bytes <= FMOD_STAGING_BYTES;
+}
+
+static int fmod_wait_stable_info(fmod_getinfo_fn getinfo,
+                                 int out[FMOD_INFO_COUNT]) {
+  int previous[FMOD_INFO_COUNT] = {0};
+  int have_previous = 0;
+
+  for (int tries = 0;
+       tries < 1000 && !g_fmod_stop && !jni_quit_requested;
+       tries++) {
+    int current[FMOD_INFO_COUNT];
+    for (int i = 0; i < FMOD_INFO_COUNT; i++)
+      current[i] = getinfo(fake_env, &g_fmod_this_token, i);
+
+    if (tries < 5 || (tries % 100) == 0) {
+      debugPrintf("[fmod] info rate=%d block=%d buffers=%d ready=%d ch=%d\n",
+                  current[0], current[1], current[2], current[3], current[4]);
+    }
+
+    if (fmod_info_valid(current)) {
+      if (have_previous &&
+          memcmp(previous, current, sizeof(current)) == 0) {
+        memcpy(out, current, sizeof(current));
+        return 1;
+      }
+      memcpy(previous, current, sizeof(current));
+      have_previous = 1;
+    } else {
+      have_previous = 0;
+    }
+
+    svcSleepThread(10000000ULL); // 10 ms
+  }
+
+  return 0;
+}
+
 static void *fmod_audio_thread(void *arg) {
   (void)arg;
+
+  static uint8_t fmod_tls[BIONIC_TLS_SIZE] __attribute__((aligned(16)));
+  install_bionic_tls(fmod_tls);
+
   fmod_getinfo_fn getinfo = (fmod_getinfo_fn)g_fmod_getinfo;
   fmod_process_fn process = (fmod_process_fn)g_fmod_process;
-  if (!process) { debugPrintf("[fmod] pump: no process ptr, abort\n"); return NULL; }
 
-  int rate = 48000, channels = 2;
-  if (getinfo) {
-    int r = getinfo(fake_env, &g_fmod_this_token, 0);
-    int c = getinfo(fake_env, &g_fmod_this_token, 1);
-    debugPrintf("[fmod] getInfo: [0]=%d [1]=%d [2]=%d [3]=%d [4]=%d\n",
-                r, c, getinfo(fake_env, &g_fmod_this_token, 2),
-                getinfo(fake_env, &g_fmod_this_token, 3),
-                getinfo(fake_env, &g_fmod_this_token, 4));
-    if (r >= 8000 && r <= 192000) rate = r;
-    if (c == 1 || c == 2 || c == 6) channels = c;
-  }
-  const int frame_bytes = channels * 2; // S16
-
-  // CRITICAL: start() fires before Unity's render loop has driven a single
-  // System::update(), so the FMOD mixer's DSP buffers aren't allocated yet --
-  // calling fmodProcess now faults (null deref deep in the mix/copy path). Wait
-  // for the engine to tick a batch of frames (each drives a System::update that
-  // finalizes the mixer) before the first call. A faulting call can't be caught
-  // (no working SEH here), so this warmup is the only protection.
-  extern uint32_t port_frame_count(void);
-  #define FMOD_WARMUP_FRAMES 120u
-  uint32_t f0 = port_frame_count();
-  debugPrintf("[fmod] warmup: waiting %u frames (start frame=%u)\n", FMOD_WARMUP_FRAMES, f0);
-  for (int guard = 0; guard < 1500; guard++) {            // ~15s hard cap
-    if (port_frame_count() - f0 >= FMOD_WARMUP_FRAMES) break;
-    svcSleepThread(10000000ULL);                          // 10 ms
-  }
-  debugPrintf("[fmod] warmup done at frame=%u, probing\n", port_frame_count());
-
-  // start() may still be wiring the FMOD output singleton; fmodProcess writes
-  // nothing until it's live. Retry the probe briefly before giving up.
-  int block = 0;
-  for (int tries = 0; tries < 100 && block <= 0; tries++) {
-    block = probe_block_bytes(process, frame_bytes);
-    if (block <= 0) svcSleepThread(10000000ULL); // 10 ms
-  }
-  debugPrintf("[fmod] pump start: %d Hz, %d ch, block=%d bytes (%d frames)\n",
-              rate, channels, block, block / (frame_bytes ? frame_bytes : 1));
-  if (block <= 0) {
-    debugPrintf("[fmod] pump: fmodProcess wrote nothing after retries, abort\n");
+  if (!getinfo || !process) {
+    debugPrintf("[fmod] abort: missing getInfo/process ptr\n");
+    g_fmod_loader_state = -1;
     return NULL;
   }
 
-  int dev_rate = audio_fmod_open(rate, channels);
-  if (!dev_rate) { debugPrintf("[fmod] pump: device open failed, abort\n"); return NULL; }
+  extern uint32_t port_frame_count(void);
 
-  // pace to realtime via the device queue; target ~4 blocks buffered.
-  const uint32_t hi = (uint32_t)block * 6;
-  const uint32_t lo = (uint32_t)block * 3;
-  long iters = 0;
-  for (;;) {
-    while (audio_fmod_queued() > hi)
-      svcSleepThread(2000000ULL); // 2 ms
-    // refill toward the low watermark
-    do {
-      process(fake_env, &g_fmod_this_token, &g_fmod_bb_token);
-      uint32_t q = audio_fmod_write(g_fmod_staging, block);
-      if (iters < 4) {
-        debugPrintf("[fmod] block %ld: peak=%d queued=%u\n",
-                    iters, (int)block_peak(block), q);
-      }
-      iters++;
-      if (q > hi) break;
-    } while (audio_fmod_queued() < lo);
-    svcSleepThread(2000000ULL); // 2 ms
+  const uint32_t start_frame = port_frame_count();
+  debugPrintf("[fmod] TLS installed; warmup from frame=%u\n", start_frame);
+
+  while (!g_fmod_stop && !jni_quit_requested &&
+         port_frame_count() - start_frame < 120u) {
+    svcSleepThread(10000000ULL);
   }
+
+  if (g_fmod_stop || jni_quit_requested) {
+    if (g_fmod_loader_state == 0)
+      g_fmod_loader_state = -1;
+    return NULL;
+  }
+
+  int info[FMOD_INFO_COUNT];
+  if (!fmod_wait_stable_info(getinfo, info)) {
+    debugPrintf("[fmod] abort: FMOD never reached a stable ready state\n");
+    g_fmod_loader_state = -1;
+    return NULL;
+  }
+
+  const int rate = info[FMOD_INFO_RATE];
+  const int channels = info[FMOD_INFO_CHANNELS];
+  const int frames = info[FMOD_INFO_BLOCK_FRAMES];
+  const int block_bytes = frames * channels * (int)sizeof(int16_t);
+
+  debugPrintf("[fmod] READY rate=%d ch=%d block_frames=%d buffers=%d bytes=%d\n",
+              rate, channels, frames, info[FMOD_INFO_BUFFER_COUNT], block_bytes);
+
+  const int device_rate = audio_fmod_open(rate, channels);
+  if (!device_rate) {
+    debugPrintf("[fmod] abort: audio_fmod_open failed\n");
+    g_fmod_loader_state = -1;
+    return NULL;
+  }
+
+  debugPrintf("[fmod] output opened: requested=%d actual=%d\n",
+              rate, device_rate);
+
+  /* Existing 120-frame FMOD warmup completed above. Playback logic unchanged. */
+  g_fmod_loader_state = 1;
+  debugPrintf("[load703] audio READY\n");
+
+  const uint32_t hi = (uint32_t)block_bytes * 6u;
+  const uint32_t lo = (uint32_t)block_bytes * 3u;
+
+  unsigned long blocks = 0;
+
+  while (!g_fmod_stop && !jni_quit_requested) {
+    while (!g_fmod_stop && !jni_quit_requested &&
+           audio_fmod_queued() > hi) {
+      svcSleepThread(2000000ULL);
+    }
+
+    if (g_fmod_stop || jni_quit_requested)
+      break;
+
+    do {
+      memset(g_fmod_staging, 0, (size_t)block_bytes);
+
+      int rc = process(fake_env, &g_fmod_this_token, &g_fmod_bb_token);
+      if (rc != 0) {
+        debugPrintf("[fmod] fmodProcess rc=%d -> stopping\n", rc);
+        g_fmod_stop = 1;
+        break;
+      }
+
+      uint32_t queued = audio_fmod_write(g_fmod_staging, block_bytes);
+
+      if (blocks < 10 || (blocks % 600ul) == 0) {
+        debugPrintf("[fmod] block=%lu peak=%d queued=%u\n",
+                    blocks, fmod_peak_s16(block_bytes), queued);
+      }
+      blocks++;
+
+      if (queued > hi)
+        break;
+
+    } while (!g_fmod_stop && !jni_quit_requested &&
+             audio_fmod_queued() < lo);
+
+    svcSleepThread(2000000ULL);
+  }
+
+  debugPrintf("[fmod] thread exit blocks=%lu\n", blocks);
   return NULL;
 }
 
-// Called from dispatch_void when FMODAudioDevice.start() fires (pointers are
-// already captured by then -- RegisterNatives precedes start()).
 void fmod_audio_start(void) {
-  if (g_fmod_started) return;
-  if (!g_fmod_process) { debugPrintf("[fmod] start(): process ptr not captured yet\n"); return; }
-  g_fmod_started = 1;
-  pthread_t th;
-  if (pthread_create(&th, NULL, fmod_audio_thread, NULL) != 0) {
-    debugPrintf("[fmod] pthread_create failed\n");
-    g_fmod_started = 0;
+  if (g_fmod_started)
+    return;
+
+  g_fmod_loader_state = 0;
+
+  if (!g_fmod_getinfo || !g_fmod_process) {
+    debugPrintf("[fmod] start ignored: native ptrs not captured\n");
+    g_fmod_loader_state = -1;
     return;
   }
-  pthread_detach(th);
-  debugPrintf("[fmod] native playback thread launched\n");
+
+  g_fmod_stop = 0;
+  g_fmod_started = 1;
+
+  if (pthread_create(&g_fmod_thread, NULL, fmod_audio_thread, NULL) != 0) {
+    debugPrintf("[fmod] pthread_create failed\n");
+    g_fmod_started = 0;
+    g_fmod_loader_state = -1;
+    return;
+  }
+
+  debugPrintf("[fmod] native playback thread launched (R3.48 FIXED)\n");
+}
+
+void fmod_audio_stop(void) {
+  if (!g_fmod_started)
+    return;
+
+  debugPrintf("[fmod] stop requested\n");
+  g_fmod_stop = 1;
+  pthread_join(g_fmod_thread, NULL);
+  g_fmod_started = 0;
+  debugPrintf("[fmod] stopped\n");
 }
 
 // ---------------------------------------------------------------------------

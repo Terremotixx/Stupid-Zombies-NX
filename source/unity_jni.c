@@ -116,9 +116,23 @@ static const char *managed_root(void){
 typedef struct { char type; char *key; char *val; } KV;
 static KV   *g_kv = NULL; static int g_kv_n=0, g_kv_cap=0; static int g_kv_dirty=0;
 
+/* R3.41: the non-scrollable stage-selector uses scroll*0 PlayerPrefs.
+ * Quarantine only those keys. Real level-list positions (scroll*1, *2, ...)
+ * are still stored/restored normally. */
+static int sz_is_stage0_scroll_key(const char *key){
+  if (!key || strncmp(key, "scroll", 6) != 0) return 0;
+  const size_t n = strlen(key);
+  return (n >= 7 && key[n-1] == '0');
+}
+
 static char *prefs_file(char *buf,size_t n){ snprintf(buf,n,"%s/prefs.kv",g_root); return buf; }
 
 static void kv_set(char type,const char*key,const char*val){
+  if (type == 'F' && sz_is_stage0_scroll_key(key)){
+    debugPrintf("[prefs] R3.41 ignore stage0 scroll write '%s'=%s\n",
+                key ? key : "", val ? val : "");
+    return;
+  }
   for (int i=0;i<g_kv_n;i++) if(!strcmp(g_kv[i].key,key)){
     g_kv[i].type=type; free(g_kv[i].val); g_kv[i].val=strdup(val); g_kv_dirty=1; return; }
   if (g_kv_n==g_kv_cap){ g_kv_cap=g_kv_cap?g_kv_cap*2:32; g_kv=realloc(g_kv,g_kv_cap*sizeof(KV)); }
@@ -539,6 +553,44 @@ uint64_t unity_dispatch_int(void *recv, const void *id_, va_list va){ const stru
     return 0;
   }
   return 0;
+}
+
+/* SZ_R322_SCROLL_GETFLOAT
+ * Unity PlayerPrefs stores the chapter/level-list scroll position as a float.
+ * Writes already reached putFloat(), but reads fell through the generic JNI
+ * float handler and always returned 0. Restore Android SharedPreferences
+ * getFloat(key, default) semantics for both varargs and jvalue[] paths.
+ */
+static float prefs_get_float_obj(void *key_obj, float def){
+  const char *k = jni_string_utf(key_obj);
+
+  if (sz_is_stage0_scroll_key(k)){
+    debugPrintf("[prefs] R3.41 stage0 getFloat '%s' -> %.6g [forced default]\n",
+                k ? k : "", (double)def);
+    return def;
+  }
+
+  KV *kv = kv_get(k);
+  float v = kv ? strtof(kv->val, NULL) : def;
+  debugPrintf("[prefs] getFloat '%s' -> %.6g%s\n",
+              k ? k : "", (double)v, kv ? " [stored]" : " [default]");
+  return v;
+}
+
+float unity_prefs_get_float_jvalue(void *key_obj, float def){
+  return prefs_get_float_obj(key_obj, def);
+}
+
+float unity_dispatch_float(void *recv, const void *id_, va_list va){
+  (void)recv;
+  const struct FakeID *id = id_;
+  const char *m = id->name;
+  if (!strcmp(m, "getFloat") && strstr(id->sig, "(Ljava/lang/String;F)F")) {
+    void *key = va_arg(va, void *);
+    double def_promoted = va_arg(va, double);
+    return prefs_get_float_obj(key, (float)def_promoted);
+  }
+  return 0.0f;
 }
 
 /* ---- void calls --------------------------------------------------------- */

@@ -24,6 +24,7 @@ extern void *fake_env; // JNIEnv *
 extern volatile int jni_quit_requested;
 
 void jni_init(void);
+void jni_runq_shutdown(void);
 
 // the fake MyNativeActivity jobject handed to ANativeActivity.clazz
 void *jni_make_activity_object(void);

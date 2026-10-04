@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdio.h>
+#include <pthread.h>   /* SZ R3 loading animation */
 #include <sys/stat.h>
 #include <switch.h>
 #include <SDL2/SDL.h>
@@ -26,6 +27,7 @@
 #include "util.h"
 #include "error.h"
 #include <sys/statvfs.h>
+#include <setjmp.h>
 #if ABR_ASSET_PACK
 #include "asset_pack.h"
 #endif
@@ -45,6 +47,89 @@
 #define NX_STR2(x) #x
 #define NX_STR(x) NX_STR2(x)
 #pragma message ("building abreloaded_nx source rev " ABR_SRC_REV " (DEBUG_LOG=" NX_STR(DEBUG_LOG) ")")
+
+/* SZ_R3_LOADING_BEGIN
+ * Very small pre-Unity loading screen. It owns libnx's default text console
+ * only while the wrapper is doing CPU/file/module setup. It is shut down
+ * immediately before Unity takes ownership of the default NWindow/EGL path.
+ *
+ * Keeping this pre-EGL is deliberate: two producers must not drive the same
+ * NWindow at once. The last "Cargando..." frame normally remains visible
+ * until Unity presents its first buffer.
+ */
+static volatile int g_sz_loading_run = 0;
+static int g_sz_loading_thread_started = 0;
+static int g_sz_loading_console_active = 0;
+static pthread_t g_sz_loading_thread;
+
+static void *sz_loading_worker(void *arg) {
+  (void)arg;
+  unsigned dots = 1;
+  while (g_sz_loading_run) {
+    /* SZ_R3701_FINAL_LOADING_MESSAGE
+     * Default libnx console is ~80x45 at 1280x720. */
+    printf("\x1b[2J");
+    printf("\x1b[21;35HLoading");
+    for (unsigned i = 0; i < dots; i++) putchar('.');
+    for (unsigned i = dots; i < 3; i++) putchar(' ');
+    printf("\x1b[23;28HPlease wait a few seconds");
+    fflush(stdout);
+    consoleUpdate(NULL);
+
+    dots++;
+    if (dots > 3) dots = 1;
+    svcSleepThread(350000000LL);
+  }
+  return NULL;
+}
+
+static void sz_loading_start(void) {
+  if (g_sz_loading_console_active) return;
+
+  PrintConsole *c = consoleInit(NULL);
+  if (!c) {
+    debugPrintf("[loadui] consoleInit failed -- continuing without loader\n");
+    return;
+  }
+
+  g_sz_loading_console_active = 1;
+  g_sz_loading_run = 1;
+
+  /* Put something on screen even if pthread creation fails. */
+  printf("\x1b[2J\x1b[21;35HLoading...");
+  printf("\x1b[23;28HPlease wait a few seconds");
+  fflush(stdout);
+  consoleUpdate(NULL);
+
+  if (pthread_create(&g_sz_loading_thread, NULL, sz_loading_worker, NULL) == 0) {
+    g_sz_loading_thread_started = 1;
+    debugPrintf("[loadui] animated Loading... started\n");
+  } else {
+    debugPrintf("[loadui] pthread_create failed -- static Loading... only\n");
+  }
+}
+
+static void sz_loading_stop(void) {
+  if (!g_sz_loading_console_active) return;
+
+  g_sz_loading_run = 0;
+  if (g_sz_loading_thread_started) {
+    pthread_join(g_sz_loading_thread, NULL);
+    g_sz_loading_thread_started = 0;
+  }
+
+  /* Leave a final complete label as the hand-off frame. */
+  printf("\x1b[2J\x1b[21;35HLoading...");
+  printf("\x1b[23;28HPlease wait a few seconds");
+  fflush(stdout);
+  consoleUpdate(NULL);
+
+  consoleExit(NULL);
+  g_sz_loading_console_active = 0;
+  debugPrintf("[loadui] handed display to Unity\n");
+}
+/* SZ_R3_LOADING_END */
+
 
 #ifndef DATA_ROOT
 #define DATA_ROOT  "sdmc:/switch/" GAME_FOLDER   /* -> sdmc:/switch/abreloaded */
@@ -120,6 +205,7 @@ static volatile double g_unity_time = 0.0;
 static volatile uint32_t g_frame_count = 0;   /* Time.frameCount source */
 static uint64_t g_time_prev_ns  = 0;
 static uint64_t g_time_start_ns = 0;
+
 /* Unity native vsync primitives (round 56). Android's Choreographer signals
  * these every frame; on Switch we must. Triple at libunity+0x110e8d0:
  * mutex @+0x0, cond @+0x28 (0x110e8f8), counter @+0x58 (0x110e928). Confirmed
@@ -141,13 +227,21 @@ static void nx_time_tick(void) {
   g_frame_count++;                    /* advance Time.frameCount once per frame */
   if (!g_time_start_ns) g_time_start_ns = now;
   if (g_time_prev_ns) {
+
+    /* SZ_R320_STABLE_TIMING: restored R3.16 timing semantics. */
+
     double dt = (double)(now - g_time_prev_ns) / 1e9;
+
     if (dt < 0) dt = 0;
-    if (dt > 0.1) dt = 0.1;            /* clamp, mirrors Unity maximumDeltaTime */
+
+    if (dt > 0.1) dt = 0.1;
+
     g_unity_dt = (float)dt;
+
     g_unity_time += dt;
+
   }
-  g_time_prev_ns = now;
+g_time_prev_ns = now;
 }
 static float nx_delta_time(void) { return g_unity_dt; }
 static float nx_time_f(void)     { return (float)g_unity_time; }
@@ -176,6 +270,7 @@ static uint64_t  g_clk_base_ns = 0;
 static volatile uint64_t g_last_main_tick_ns = 0;
 static Mutex     g_clock_lock;                       /* main-hook vs clock-thread */
 static Thread    g_clock_thr;
+static int       g_clock_thread_live;
 #define CLOCK_STALL_NS 100000000ULL                  /* 100ms main silence => stalled */
 /* Re-run Update's body with a wall-clock newTime so deltaTime/m_Time advance even
  * while UnityMain is parked in a synchronous scene-load (the frame-0 async hang). */
@@ -424,6 +519,15 @@ static void nx_clock_thread(void *arg) {
     }
   }
 }
+/* SZ_R313_CLOCK_STOP */
+static void nx_clock_thread_shutdown(void) {
+  if (!g_clock_thread_live) return;
+  threadWaitForExit(&g_clock_thr);
+  threadClose(&g_clock_thr);
+  g_clock_thread_live = 0;
+  debugPrintf("[quitthr] clock thread stopped\n");
+}
+
 static void nx_install_time_fix(void) {
   uintptr_t ub = (uintptr_t)unity_mod.load_virtbase;
   g_unity_update_body = (void (*)(void *, double))(ub + ABR_TIME_UPDATE_BODY);   /* PvZ Update body */
@@ -456,8 +560,9 @@ static void nx_install_time_fix(void) {
                 *(volatile uint32_t *)(ub + ABR_TIME_UPDATE_ENTRY));
     return;
   }
-  if (R_SUCCEEDED(threadCreate(&g_clock_thr, nx_clock_thread, NULL, NULL, 0x8000, 0x2C, -2)))
-    threadStart(&g_clock_thr);
+  Result _clkrc = threadCreate(&g_clock_thr, nx_clock_thread, NULL, NULL, 0x8000, 0x2C, -2);
+  if (R_SUCCEEDED(_clkrc) && R_SUCCEEDED(threadStart(&g_clock_thr)))
+    g_clock_thread_live = 1;
   debugPrintf("[boot] installed TimeManager::Update hook @libunity+ABR_TIME_UPDATE_ENTRY "
               "+ clock thread (newTime <- startupRef + wallclock)\n");
 }
@@ -846,7 +951,80 @@ static fn_inject   Unity_nativeInjectEvent;
 static fn_v        Unity_nativeResume;
 static fn_vz       Unity_nativeFocusChanged;
 static fn_z        Unity_nativeDone;
+
+/* SZ_R37_QUIT_STAGE_HELPER
+ * Persist the last completed shutdown stage independently of debug.log.
+ * The file is overwritten at every stage, so after the Horizon error it tells
+ * us exactly how far cleanup got.
+ */
+static void sz_quit_stage(const char *stage) {
+  FILE *f = fopen(DATA_ROOT "/quit_stage.txt", "w");
+  if (!f) return;
+  fprintf(f, "%s\n", stage);
+  fflush(f);
+  fclose(f);
+}
+
+
+/* SZ_R38_CUSTOM_APPEXIT
+ * libnx's default __appExit calls __nx_win_exit before service shutdown.
+ * R3.7 proved our own SDL/OpenSL/socket cleanup completes and the failure only
+ * starts inside __libnx_exit. For a game-requested Quit, avoid a second window
+ * teardown after SDL_Quit. External applet exits retain the normal hook.
+ */
+void __attribute__((weak)) userAppExit(void);
+void __attribute__((weak)) __nx_win_exit(void);
+
+void __appExit(void) {
+  sz_quit_stage("6 entered custom __appExit");
+
+  if (&userAppExit)
+    userAppExit();
+
+  if (&__nx_win_exit) {
+    if (jni_quit_requested) {
+      sz_quit_stage("7 skipped __nx_win_exit");
+    } else {
+      __nx_win_exit();
+    }
+  }
+
+  /* SZ_R39_SERVICE_PROBE
+   * Keep SD mounted while probing the non-FS libnx shutdown calls, so the
+   * persistent quit_stage.txt can tell us exactly which one fails.
+   * FS teardown is intentionally moved to the end for this diagnostic build.
+   */
+  sz_quit_stage("8 before timeExit");
+  timeExit();
+
+  sz_quit_stage("9 after timeExit; before hidExit");
+  hidExit();
+
+  sz_quit_stage("10 after hidExit; before appletExit");
+  appletExit();
+
+  sz_quit_stage("11 after appletExit; before smExit");
+  smExit();
+
+  sz_quit_stage("12 after smExit; before fsdevUnmountAll");
+
+  /* SZ_R310_SKIP_FS_ON_GAME_QUIT
+   * R3.9 proved timeExit/hidExit/appletExit/smExit all return cleanly.
+   * The only remaining failing region is fsdevUnmountAll/fsExit or what follows.
+   * For the in-game Quit path, leave FS teardown to process termination.
+   * External applet exits still use the normal explicit FS cleanup.
+   */
+  if (jni_quit_requested) {
+    sz_quit_stage("13 game Quit: skipped fsdevUnmountAll/fsExit");
+    return;
+  }
+
+  fsdevUnmountAll();
+  fsExit();
+}
+
 static fn_v        Unity_nativeApplicationUnload;
+
 
 /* ---------------------------------------------------------------------------
  * In-memory libunity patch (ported from VLN's nx_patch_unity_regions): the SD
@@ -1225,7 +1403,7 @@ static void nx_boot_il2cpp_hacks(void) {
 }
 
 int main(int argc, char *argv[]) {
-  (void)argc; (void)argv;
+(void)argc; (void)argv;
   socketInitializeDefault();
   debugPrintf("[boot] === abreloaded_nx " ABR_SRC_REV " start (region64mb build) ===\n");
 
@@ -1502,6 +1680,8 @@ int main(int argc, char *argv[]) {
   SDL_SetMainReady();
   if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) < 0)
     debugPrintf("SDL_Init failed: %s\n", SDL_GetError());
+
+  sz_loading_start();
 
   /* Reassemble any *.splitN assets before the preflight check. Unity does
    * this in Java on a phone (see nx_splitjoin.c); we have no Java, so we
@@ -1949,8 +2129,13 @@ int main(int argc, char *argv[]) {
 
   debugPrintf("[boot] calling initJni...\n");
   Unity_initJni(fake_env, fake_unityplayer_thiz, fake_context_obj);
+  extern void sz_store_fix_install(void);
+  sz_store_fix_install(); /* R3.50: allow B to close the in-level Store */
   debugPrintf("[boot] initJni returned; nativeRecreateGfxState...\n");
-  Unity_nativeRecreateGfxState(fake_env, fake_unityplayer_thiz, 0, fake_surface_obj);
+  
+  /* SZ_R3_LOADING_HANDOFF */
+  sz_loading_stop();
+Unity_nativeRecreateGfxState(fake_env, fake_unityplayer_thiz, 0, fake_surface_obj);
   nx_gpu_probe();   /* hardware-vs-software ASTC, one line in debug.log */
   debugPrintf("[boot] gfx state created; sendSurfaceChanged...\n");
   Unity_nativeSendSurfaceChanged(fake_env, fake_unityplayer_thiz);
@@ -2000,13 +2185,25 @@ int main(int argc, char *argv[]) {
     const uint64_t render_t0 = armGetSystemTick();
     const int rendered = Unity_nativeRender(fake_env, fake_unityplayer_thiz);
     const uint64_t render_ms = armTicksToNs(armGetSystemTick() - render_t0) / 1000000ull;
-    opensles_visual_frame_end();
+opensles_visual_frame_end();
+
     /* swkbdShow blocks inside a JNI call made during nativeRender. Android's
      * keyboard reports its result asynchronously, so wait for nativeRender to
      * return—and therefore for Unity's open/configuration stack to unwind—
      * before delivering the confirmed string and close event. */
     editbox_pump();
-    if (!rendered) break;
+
+    /* SZ_R36_NATIVE_RENDER_ZERO_QUIT
+     * R3.5c proved endUnityLaunch arrives on the same pthread only after the
+     * render jump is already disarmed. Therefore nativeRender() has returned.
+     * A false return is the game's completed Quit signal. Mark it before
+     * wrapper cleanup so SZ_R3_QUIT_SAFE skips duplicate Unity teardown.
+     */
+    if (!rendered) {
+      jni_quit_requested = 1;
+      debugPrintf("[quit] nativeRender returned 0 -> game-requested exit\n");
+      break;
+    }
     (void)render_ms;  /* retained for the A/V gate's duration report */
 #if ABR_HAVE_OFFLINE_RESULT_BUTTONS
     nx_result_pump();
@@ -2036,15 +2233,74 @@ int main(int argc, char *argv[]) {
    * would otherwise lose it. */
   android_native_input_shutdown();
 
-  Unity_nativeApplicationUnload(fake_env, fake_unityplayer_thiz);
-  Unity_nativeDone(fake_env, fake_unityplayer_thiz);
+  /* SZ_R3_QUIT_SAFE
+   * Application.Quit()/Activity.finish() already starts Unity's Android-side
+   * teardown. Calling nativeApplicationUnload/nativeDone again from the wrapper
+   * is the path that crashes Stupid Zombies on Quit. For an external applet
+   * exit we retain the base wrapper's normal teardown.
+   */
+  if (!jni_quit_requested) {
+    Unity_nativeApplicationUnload(fake_env, fake_unityplayer_thiz);
+    Unity_nativeDone(fake_env, fake_unityplayer_thiz);
+  } else {
+    debugPrintf("[quit] game-requested exit: skipping duplicate Unity Android teardown\n");
+  }
 
+  /* SZ_R38_NORMAL_MAIN_RETURN */
+  /* SZ_R313_THREAD_SHUTDOWN */
+  if (jni_quit_requested) {
+    debugPrintf("[quitthr] stopping wrapper-owned threads...\n");
+    jni_runq_shutdown();
+    nx_clock_thread_shutdown();
+    diag_watchdog_stop();
+    extern void nx_canary_sweeper_stop(void);
+    nx_canary_sweeper_stop();
+    sz_quit_stage("15 wrapper-owned threads stopped");
+    debugPrintf("[quitthr] wrapper-owned threads stopped\n");
+  }
+
+  sz_quit_stage("1 before opensles_shutdown");
+  debugPrintf("[quitdiag] before opensles_shutdown\n");
   opensles_shutdown();
+
+  sz_quit_stage("2 after opensles_shutdown");
+  debugPrintf("[quitdiag] after opensles_shutdown; before SDL_Quit\n");
   SDL_Quit();
-  debugLogClose();   /* persist the larger buffered log on a clean exit */
+
+  sz_quit_stage("3 after SDL_Quit");
+  debugPrintf("[quitdiag] after SDL_Quit; before debugLogClose\n");
+  debugLogClose();
+
+  sz_quit_stage("4 after debugLogClose");
   socketExit();
 
-  extern void NX_NORETURN __libnx_exit(int rc);
-  __libnx_exit(0);
+  sz_quit_stage("5 after socketExit; returning from main");
+
+  /* SZ_R316_APPLET_SELF_EXIT_HANDSHAKE
+   * Wrapper-owned threads are already stopped by R3.13, and OpenSL/SDL/socket
+   * cleanup is complete. Do NOT return into our normal __appExit() for a
+   * game-requested Quit. Instead use libnx's applet self-exit handshake:
+   *
+   *   mode=1 -> appletExit() installs _appletExitProcess as exit callback
+   *   envGetExitFuncPtr() retrieves that callback
+   *   __nx_exit(0, callback) transfers to it and never returns
+   */
+  if (jni_quit_requested) {
+    extern u32 __nx_applet_exit_mode;
+    extern void NX_NORETURN __nx_exit(Result rc, LoaderReturnFn retaddr);
+
+    __nx_applet_exit_mode = 1;
+    sz_quit_stage("18 before appletExit self-exit handshake");
+    appletExit();
+
+    LoaderReturnFn retaddr = envGetExitFuncPtr();
+    if (retaddr) {
+      sz_quit_stage("19 applet exit callback acquired; entering __nx_exit");
+      __nx_exit(0, retaddr);
+    }
+
+    sz_quit_stage("20 appletExit returned no callback; falling back");
+  }
+
   return 0;
 }

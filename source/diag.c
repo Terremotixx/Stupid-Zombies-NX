@@ -47,6 +47,8 @@ static __thread DiagThread *self;       /* this thread's slot (host TLS)        
 static volatile int      g_frame = -1;
 static volatile uint64_t g_last_progress;   /* tick of last diag_frame()           */
 static volatile int      g_wd_started;
+static volatile int      g_wd_stop;
+static int               g_wd_thread_live;
 static Thread            g_wd_thread;
 
 /* ------------------------------------------------------------------ helpers */
@@ -470,8 +472,9 @@ static void watchdog_main(void *unused) {
   if (g_last_progress == 0) g_last_progress = now_tick();
   extern volatile u64 g_swap_enter_tick;   /* armed by egl_SwapBuffers_log */
   uint64_t swap_dumped = 0;
-  for (;;) {
+  while (!g_wd_stop) {
     svcSleepThread(DIAG_POLL_NS);
+    if (g_wd_stop) break;
     /* Never paused (this thread is not in the registry), so it can always
      * rescue a stop-the-world that has wedged. Must run before anything
      * else here: the rest of the tick may take locks. */
@@ -513,14 +516,31 @@ static void watchdog_main(void *unused) {
 void diag_watchdog_start(void) {
   if (g_wd_started) return;
   g_wd_started = 1;
+  g_wd_stop = 0;
+  g_wd_thread_live = 0;
   nro_range_init();
   if (g_last_progress == 0) g_last_progress = now_tick();
   /* libnx thread: deliberately NOT via the pthread shim under test.
    * 16 KiB stack, priority 0x2C (same band as main), default core. */
   Result rc = threadCreate(&g_wd_thread, watchdog_main, NULL, NULL, 0x4000, 0x2C, -2);
-  if (R_SUCCEEDED(rc) && R_SUCCEEDED(threadStart(&g_wd_thread)))
+  if (R_SUCCEEDED(rc) && R_SUCCEEDED(threadStart(&g_wd_thread))) {
+    g_wd_thread_live = 1;
     debugPrintf("[wd] watchdog armed (stall=%llus, poll=1s)\n",
                 (unsigned long long)(DIAG_STALL_NS / 1000000000ull));
-  else
+  } else {
     debugPrintf("[wd] watchdog FAILED to start rc=0x%x\n", rc);
+  }
+}
+
+/* SZ_R313_WATCHDOG_STOP */
+void diag_watchdog_stop(void) {
+  if (!g_wd_started) return;
+  g_wd_stop = 1;
+  if (g_wd_thread_live) {
+    threadWaitForExit(&g_wd_thread);
+    threadClose(&g_wd_thread);
+    g_wd_thread_live = 0;
+  }
+  g_wd_started = 0;
+  debugPrintf("[quitthr] watchdog stopped\n");
 }

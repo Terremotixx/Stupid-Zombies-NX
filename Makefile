@@ -15,11 +15,11 @@ endif
 TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
-TARGET    := abreloaded_nx
-APP_TITLE := Angry Birds Reloaded
-APP_AUTHOR := aks796, Rovio Entertainment
-APP_VERSION := 1.0.0
-APP_ICON  := $(TOPDIR)/reloaded.jpg
+TARGET := stupidzombies_nx
+APP_TITLE := Stupid Zombies
+APP_AUTHOR := GameResort / Switch wrapper
+APP_VERSION := 3.4.5-bringup1
+APP_ICON := $(TOPDIR)/stupidzombies.jpg
 export APP_TITLE APP_AUTHOR APP_VERSION APP_ICON
 BUILD     := build
 SOURCES   := source

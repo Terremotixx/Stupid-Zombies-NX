@@ -163,13 +163,12 @@
 #define SO_CPP_NAME  "libil2cpp.so"
 
 // The SD-card folder holding the .nro + the game files.
-#define GAME_FOLDER  "abreloaded"
+#define GAME_FOLDER "stupidzombies"
 
 /* Bump when shipping. Printed at compile time (#pragma message in main.c)
  * and at boot, so a stale source tree is obvious from either the build
  * output or debug.log. */
-#define ABR_SRC_REV   "abr-r17-r9-keyboard-deferred"
-
+#define ABR_SRC_REV "sz-3.4.5-r3.70.23-stable"
 /* ---- Android package name -- VERIFY THIS AGAINST YOUR APK -----------------
  * Returned by our fake getPackageName(). Unity surfaces it as
  * Application.identifier, and game code (and any SDK that keys off it) can
@@ -188,7 +187,7 @@
  * It matters: getPackageName() feeds Application.identifier and the Context
  * path getters, so a wrong value sends persistentDataPath somewhere the game
  * does not expect.                                                          */
-#define GAME_PACKAGE "com.rovio.reloadedport"
+#define GAME_PACKAGE "com.gameresort.stupidzombies"
 
 /* ---- split-asset auto-join (nx_splitjoin.c) ------------------------------
  * This build ships some assets as 1 MiB .split0/.split1/... parts, which Unity
@@ -308,7 +307,7 @@
 /* round 64: vsync/Choreographer pulse period. 16ms == ~60fps cap; the load
  * is frame-gated so a shorter period renders (and loads) faster. Delta-time
  * is hooked so game speed is unchanged. */
-#define ABR_VSYNC_PERIOD_NS 16000000ULL
+#define ABR_VSYNC_PERIOD_NS 16666667ULL
 #define ABR_SWAP_FINISH_N 8
 
 /* ---- libil2cpp hook gates (see patches/patch_sources.py) -----------------
@@ -316,8 +315,8 @@
  * game. The PvZ core hardcodes hooks at PvZ's offsets. Both are OFF here because
  * neither was re-derived for Fruit Ninja; turning one on without re-deriving it
  * first will patch unrelated functions. Symptoms and method: PORTING sec 6.    */
-#define ABR_HAVE_TIME_HOOKS 0 /* 0: Fruit Ninja offsets, NOT derived for this game -- see nx_patch_abr.h */
-#define ABR_FORCE_SPLASH_FINISH 0 /* 0: Fruit Ninja offsets, NOT derived for this game -- see nx_patch_abr.h */
+#define ABR_HAVE_TIME_HOOKS 0
+#define ABR_FORCE_SPLASH_FINISH 0
 /* round 68: async-load integration budget, ms per frame. Unity default is
  * 4ms (High would be 50). Bigger = faster scene loads, fewer frames during
  * loading. 0 disables the patch. */

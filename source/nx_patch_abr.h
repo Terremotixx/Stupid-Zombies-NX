@@ -107,30 +107,35 @@ typedef struct { uint32_t off, from, to; } NxPatchWord;
 /* ---- 21 region-granularity sites (256MB -> 64MB) -------------------------
  * '=' : {from} is byte-identical to the corresponding Fruit Ninja table entry
  *       (independent confirmation across two builds of the same engine).      */
+/* Stupid Zombies 3.4.5 / Unity 2022.3.19f1.
+ * 256 MiB Unity allocator region granularity -> 64 MiB.
+ * Every entry is verify-first: {offset, expected stock word, replacement word}.
+ * The two #40 -> #38 sites preserve the level-1/level-2 index decomposition.
+ * No AtomicPageAllocator site was added because no matching instruction was
+ * verified in this build. Never copy the Angry Birds final site blindly. */
 static const NxPatchWord ABR_PATCH_WORDS[] = {
-  /*  0   */ { 0x718484, 0x12be0009, 0x12bf8009 },  /* VirtualAllocator round-up helper A        round-up addend  256MB-1 -> 64MB-1 */
-  /*  1   */ { 0x71848c, 0x92648d36, 0x92669536 },  /* VirtualAllocator round-up helper A        bitmask immr/imms += 2 */
-  /*  2 = */ { 0x718d1c, 0xd35cfc28, 0xd35afc28 },  /* TLSAllocator<0>::ThreadInitialize   +0x10 lsr #28 -> #26 */
-  /*  3 = */ { 0x718d20, 0x52a20009, 0x52a08009 },  /* TLSAllocator<0>::ThreadInitialize   +0x14 movz 0x1000 -> 0x0400 */
-  /*  4 = */ { 0x71a430, 0x52a20009, 0x52a08009 },  /* BucketAllocator::BucketAllocator          movz 0x1000 -> 0x0400 */
-  /*  5 = */ { 0x71c80c, 0xd35cfd29, 0xd35afd29 },  /* DynamicHeapAllocator::DynamicHeapAlloc    lsr #28 -> #26 */
-  /*  6 = */ { 0x71c810, 0x52a2000a, 0x52a0800a },  /* DynamicHeapAllocator::DynamicHeapAlloc    movz 0x1000 -> 0x0400 */
-  /*  7   */ { 0x71ccb8, 0x12be000a, 0x12bf800a },  /* VirtualAllocator round-up helper B        round-up addend  256MB-1 -> 64MB-1 */
-  /*  8   */ { 0x71ccc0, 0x92648d36, 0x92669536 },  /* VirtualAllocator round-up helper B        bitmask immr/imms += 2 */
-  /*  9   */ { 0x71ec74, 0xd35cdc33, 0xd35ad433 },  /* VirtualAllocator::MarkMemoryBlocks  +0x10 ubfx immr 28->26, width 28 kept */
-  /* 10 = */ { 0x71ec78, 0xd35cfd15, 0xd35afd15 },  /* VirtualAllocator::MarkMemoryBlocks  +0x14 lsr #28 -> #26 */
-  /* 11 = */ { 0x71ed08, 0x52a20008, 0x52a08008 },  /* VirtualAllocator::ReserveMemoryBlock+0x10 movz 0x1000 -> 0x0400 */
-  /* 12 = */ { 0x71f044, 0xd35cfc28, 0xd35afc28 },  /* VirtualAllocator::GetMemoryBlockFromPtr   lsr #28 -> #26 */
-  /* 13   */ { 0x71f054, 0x92646c28, 0x92667428 },  /* VirtualAllocator::GetMemoryBlockFromPtr   bitmask immr/imms += 2 (56-bit) */
-  /* 14 = */ { 0x71f05c, 0xd35c9c2a, 0xd35a942a },  /* VirtualAllocator::GetMemoryBlockFromPtr   ubfx immr 28->26, width 12 kept */
-  /* 15   */ { 0x71f074, 0xd35cdc29, 0xd35ad429 },  /* VirtualAllocator::GetMemoryBlockFromPtr   ubfx immr 28->26, width 28 kept */
-  /* 16   */ { 0x71f078, 0xf2a2000b, 0xf2a0800b },  /* VirtualAllocator::GetMemoryBlockFromPtr   movk 0x1000 -> 0x0400 */
-  /* 17 = */ { 0x71f0b8, 0xcb0a7108, 0xcb0a6908 },  /* VirtualAllocator::GetMemoryBlockFromPtr   sub lsl #28 -> #26 */
-  /* 18 = */ { 0x71f0e0, 0xd35c9c29, 0xd35a9429 },  /* VirtualAllocator::GetBlockInfoFromPointer ubfx immr 28->26, width 12 kept */
-  /* 19   */ { 0x71f0d0, 0xd368fc28, 0xd366fc28 },  /* VirtualAllocator::GetBlockInfoFromPointer LEVEL-1 lsr #40 -> #38 */
-  /* 20   */ { 0x720e0c, 0xd368fc28, 0xd366fc28 },  /* MemoryManager::GetAllocatorContainingPtr  LEVEL-1 lsr #40 -> #38 */
-  /* 21 = */ { 0x720e24, 0xd35c9e89, 0xd35a9689 },  /* MemoryManager::GetAllocatorContainingPtr  ubfx immr 28->26, width 12 kept */
-  /* 22 = */ { 0x7213d8, 0x52a20000, 0x52a08000 },  /* AtomicPageAllocator::AllocatePage         movz 0x1000 -> 0x0400 */
+  { 0x3a88cc, 0x12be0009, 0x12bf8009 }, /* round-up addend 256M-1 -> 64M-1 */
+  { 0x3a88d4, 0x92648d36, 0x92669536 }, /* boundary mask */
+  { 0x3a9170, 0xd35cfc28, 0xd35afc28 }, /* lsr #28 -> #26 */
+  { 0x3a9174, 0x52a20009, 0x52a08009 }, /* 256M -> 64M */
+  { 0x3aabfc, 0x52a20009, 0x52a08009 },
+  { 0x3aceb0, 0xd35cfd29, 0xd35afd29 },
+  { 0x3aceb4, 0x52a2000a, 0x52a0800a },
+  { 0x3ad35c, 0x12be000a, 0x12bf800a },
+  { 0x3ad364, 0x92648d36, 0x92669536 },
+  { 0x3af364, 0xd35cdc33, 0xd35ad433 }, /* ubfx #28 -> #26, width retained */
+  { 0x3af368, 0xd35cfd15, 0xd35afd15 },
+  { 0x3af3f8, 0x52a20008, 0x52a08008 },
+  { 0x3af734, 0xd35cfc28, 0xd35afc28 },
+  { 0x3af744, 0x92646c28, 0x92667428 },
+  { 0x3af74c, 0xd35c9c2a, 0xd35a942a }, /* level-2 field */
+  { 0x3af764, 0xd35cdc29, 0xd35ad429 },
+  { 0x3af768, 0xf2a2000b, 0xf2a0800b },
+  { 0x3af7a8, 0xcb0a7108, 0xcb0a6908 },
+  { 0x3af7c0, 0xd368fc28, 0xd366fc28 }, /* level-1 lsr #40 -> #38 */
+  { 0x3af7d0, 0xd35c9c29, 0xd35a9429 },
+  { 0x3b1484, 0xd368fc28, 0xd366fc28 }, /* level-1 lsr #40 -> #38 */
+  { 0x3b149c, 0xd35c9e89, 0xd35a9689 },
 };
 #define ABR_PATCH_WORDS_N ((int)(sizeof(ABR_PATCH_WORDS)/sizeof(ABR_PATCH_WORDS[0])))
 
@@ -178,14 +183,14 @@ static const NxPatchWord ABR_BRANCH_FORCES[] = { { 0, 0, 0 } };  /* placeholder 
 
 #define ABR_HAVE_TIME_FIX                0
 #define ABR_HAVE_TIME_HOOKS              0
-#define ABR_HAVE_IL2CPP_VM               0
-#define ABR_HAVE_ISINST_GUARD            0
-#define ABR_HAVE_LIVENESS_GUARD          0
-#define ABR_HAVE_FINISH_PROBE            0
-#define ABR_HAVE_FMOD_BUFFER_BYPASS      0
-#define ABR_HAVE_HIDE_PRESERVED_CONTENT  0
-#define ABR_HAVE_FMOD_OPENSL             1
-#define ABR_HAVE_OFFLINE_RESULT_BUTTONS  1
+#define ABR_HAVE_IL2CPP_VM 0
+#define ABR_HAVE_ISINST_GUARD 0
+#define ABR_HAVE_LIVENESS_GUARD 0
+#define ABR_HAVE_FINISH_PROBE 0
+#define ABR_HAVE_FMOD_BUFFER_BYPASS 0
+#define ABR_HAVE_HIDE_PRESERVED_CONTENT 1
+#define ABR_HAVE_FMOD_OPENSL 0
+#define ABR_HAVE_OFFLINE_RESULT_BUTTONS 0
 
 /* --- offsets: NOT DERIVED for this binary. Zero + gate off. --------------- */
 #define ABR_IL2CPP_ISINST_AND       0u
@@ -360,10 +365,10 @@ static const NxPatchWord ABR_FMOD_WORDS[] = { { 0, 0, 0 } };
  * (GC_threads, GC_stop_count, GC_retry_signals) are NOT derived, and that
  * model stays compiled out.
  * ========================================================================= */
-#define GC_SUSPEND_SIG_OFF_FN     0x24a650cu  /* .data  GC_sig_suspend        */
-#define GC_RESTART_SIG_OFF_FN     0x24a6510u  /* .data  GC_sig_thr_restart    */
-#define GC_START_ACK_OFF_FN       0x24a6508u  /* .data  2nd-ack gate          */
-#define GC_ACK_SEM_OFF_FN         0x26c47a8u  /* .bss   GC_suspend_ack_sem    */
+#define GC_SUSPEND_SIG_OFF_FN     0x249bdc4u  /* .data  GC_sig_suspend        */
+#define GC_RESTART_SIG_OFF_FN     0x249bdc8u  /* .data  GC_sig_thr_restart    */
+#define GC_START_ACK_OFF_FN       0x249bdc0u  /* .data  2nd-ack gate          */
+#define GC_ACK_SEM_OFF_FN         0x26b9c90u  /* .bss   GC_suspend_ack_sem    */
 
 /* real-stop-the-world model only -- NOT derived, and its model is off */
 #define GC_THREADS_OFF_FN         0u

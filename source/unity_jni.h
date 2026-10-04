@@ -56,6 +56,8 @@ const char *nx_managed_root(void);
 
 void     *unity_dispatch_object(void *recv, const void *id, va_list va);
 uint64_t  unity_dispatch_int   (void *recv, const void *id, va_list va); /* int/bool/long */
+float     unity_dispatch_float (void *recv, const void *id, va_list va);
+float     unity_prefs_get_float_jvalue(void *key_obj, float def);
 void      unity_dispatch_void  (void *recv, const void *id, va_list va);
 
 /* Boxed PlayerPrefs values returned by getAll() iteration. jni_fake.c routes
