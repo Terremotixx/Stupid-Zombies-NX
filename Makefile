@@ -1,12 +1,12 @@
 #---------------------------------------------------------------------------------
-# ANGRY BIRDS RELOADED -- Switch homebrew loader
-# (forked from the FRUIT NINJA CLASSIC+ port; Unity 2022.3.7f1 / IL2CPP, arm64)
+# STUPID ZOMBIES NX -- Nintendo Switch homebrew wrapper
+# Android ARM64 / Unity 2022.3.19f1 / IL2CPP
 # Requires devkitA64 + devkitPro pkgs: switch-mesa switch-libdrm_nouveau
 #                                      switch-sdl2 switch-zlib switch-libpng
 #
-# All .c files in source/ are compiled automatically, so imports_abr_extra.c
-# and imports_ndk_extra.c are picked up without editing this list.
-# nx_patch_abr.h and unity_entrypoints.h are headers included by main.c.
+# All .c files in source/ are compiled automatically.
+# Some inherited internal filenames still use the original wrapper naming;
+# they are intentionally kept to avoid unnecessary source-level churn.
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 ifeq ($(strip $(DEVKITPRO)),)
@@ -16,9 +16,9 @@ TOPDIR ?= $(CURDIR)
 include $(DEVKITPRO)/libnx/switch_rules
 
 TARGET := stupidzombies_nx
-APP_TITLE := Stupid Zombies
+APP_TITLE := Stupid Zombies NX
 APP_AUTHOR := GameResort / Switch wrapper
-APP_VERSION := 3.4.5-bringup1
+APP_VERSION := 1.0.0
 APP_ICON_CUSTOM := $(TOPDIR)/stupidzombies.jpg
 APP_ICON := $(if $(wildcard $(APP_ICON_CUSTOM)),$(APP_ICON_CUSTOM),$(DEVKITPRO)/libnx/default_icon.jpg)
 export APP_TITLE APP_AUTHOR APP_VERSION APP_ICON
