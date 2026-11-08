@@ -1198,7 +1198,7 @@ static void *act_object(const FakeID *id, va_list va) {
   if (sig_returns(id->sig, "Ljava/lang/Class;"))
     return intern_class("java/lang/Object");
   // version / package / device / storage strings
-  if (name_has(id->name, "VersionName")) return jni_make_string("2.1.6");
+  if (name_has(id->name, "VersionName")) return jni_make_string(APP_VERSION_NAME);
   if (name_has(id->name, "PackageName")) return jni_make_string(GAME_PACKAGE);
   if (name_has(id->name, "DeviceModel")) return jni_make_string("Switch");
   // archive name getters: the engine builds "<dir>/<name>.android.mvgl" for 5
@@ -2541,11 +2541,12 @@ static void j_SetPriArrayRegion(void *env, void *arr, int start, int len, const 
 // metrics. Route every field read through a name-based dispatcher. fid is the
 // FakeID GetFieldID handed back, so cls/name/sig are all available.
 //
-// Placeholders marked CHECK are safe defaults, not the shipped values; the game
-// never verifies them against anything but a stubbed RemoteConfig, so exact
-// numbers don't gate boot. Easy to correct once known.
-#define APP_VERSION_NAME "2.1.6"   /* CHECK: real jp.kiteretsu.zookeeper_dx versionName */
-#define APP_VERSION_CODE 45        /* real value from split_config arm64 manifest */
+// Android package metadata exposed to Unity. The supported target is
+// Stupid Zombies 3.4.5. Keep the existing numeric versionCode fallback until
+// the exact manifest value is verified from the target APK; it is not used to
+// identify the supported build (the APK/SO hashes do that).
+#define APP_VERSION_NAME "3.4.5"
+#define APP_VERSION_CODE 45        /* stable compatibility fallback; exact target value unverified */
 #define NX_SDK_INT       33        /* Android 13 -- high enough to pass any minSdk gate  */
 
 static int fld_is(const FakeID *id, const char *cls_sub, const char *name) {
