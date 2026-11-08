@@ -1072,20 +1072,25 @@ void nxp_update(void) {
     }
 
     if (ui_class == 2) {
+      /* The level-entry guard must be a real timeout, not a draw-count gate.
+       *
+       * Some Stupid Zombies gameplay scenes legitimately sit at 8..13 draws
+       * for long periods.  The old logic kept resetting intro_guard to 20 in
+       * that range and required 30 frames at 14..19 draws before arming.  That
+       * could leave controller fire permanently in click-only mode, while real
+       * touchscreen input still worked normally.
+       *
+       * Keep the original 60-frame containment started on LEVELS->DYNAMIC,
+       * then arm controller dragging unconditionally once it expires.  Result
+       * overlays/settings are still independently protected below. */
       if (s_r356_intro_guard > 0)
         s_r356_intro_guard--;
 
-      if (frame_draws > 0 && frame_draws <= 12 && !s_r356_gameplay_armed)
-        s_r356_intro_guard = 20;
-
-      if (!s_r356_gameplay_armed &&
-          s_r356_intro_guard == 0 &&
-          frame_draws >= 14 && frame_draws <= 19) {
-        if (++s_r356_play_band_frames >= 30) {
-          s_r356_gameplay_armed = 1;
-          s_r356_play_band_frames = 30;
-          logf_("nxp: R3.56 gameplay drag ARMED\n");
-        }
+      if (!s_r356_gameplay_armed && s_r356_intro_guard == 0) {
+        s_r356_gameplay_armed = 1;
+        s_r356_play_band_frames = 0;
+        logf_("nxp: gameplay drag ARMED after fixed intro guard (draws=%lu)\n",
+              frame_draws);
       }
 
       if (s_r356_gameplay_armed) {
@@ -1196,6 +1201,9 @@ void nxp_update(void) {
     if (!s_r367_hold_quarantine &&
         r356_click_only_ui && controller_pressed && !s_static_ui_press) {
       /* UI overlays: one complete click only; NEVER a held drag. */
+      logf_("nxp: controller press CLICK-ONLY draws=%lu intro=%d result=%d settings=%d\n",
+            frame_draws, s_r356_intro_guard,
+            s_r362_result_visual ? 1 : 0, settings_open ? 1 : 0);
       push(s_cfg.cursor_id, s_cx, s_cy, NXP_DOWN);
       push(s_cfg.cursor_id, s_cx, s_cy, NXP_UP);
       s_static_ui_press = 1;
