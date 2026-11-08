@@ -315,7 +315,7 @@
 /* Keep the inherited asset-packer disabled. Stupid Zombies already uses a
  * large Unity archive layout, so repacking brings little benefit and the old
  * packer can delete the loose source tree after a successful pack. */
-#define ABR_BYPASS_UNITY_SPLASH 0 /* 0: Fruit Ninja offsets, NOT derived for this game -- see nx_patch_abr.h */
+#define ABR_BYPASS_UNITY_SPLASH 0 /* inherited offsets are not derived for this game */
 /* JNI approximation ledger (round 130). Records every JNI call answered by a
  * catch-all -- empty string, NULL object, 0, no-op -- deduped and counted, and
  * marks the ones Unity reads back via ExceptionCheck. Android raises at this
