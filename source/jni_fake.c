@@ -1198,7 +1198,7 @@ static void *act_object(const FakeID *id, va_list va) {
   if (sig_returns(id->sig, "Ljava/lang/Class;"))
     return intern_class("java/lang/Object");
   // version / package / device / storage strings
-  if (name_has(id->name, "VersionName")) return jni_make_string(APP_VERSION_NAME);
+  if (name_has(id->name, "VersionName")) return jni_make_string("3.4.5");
   if (name_has(id->name, "PackageName")) return jni_make_string(GAME_PACKAGE);
   if (name_has(id->name, "DeviceModel")) return jni_make_string("Switch");
   // archive name getters: the engine builds "<dir>/<name>.android.mvgl" for 5
