@@ -287,7 +287,7 @@ void android_native_input_init(void){
   c.stick_speed     = 0.0f;          /* 0 => library default, then pointer.cfg */
   c.mouse_sens      = 0.0f;          /* 0 => library default, then pointer.cfg */
   c.cursor_scale    = 0.58f;         /* SZ R3.22: ~1.62x larger, easier to see on Switch */
-  c.cursor_margin_left = (float)g_h / 15.0f; /* 48px at 720p: slingshot guard */
+  c.cursor_margin_left = (float)g_h / 15.0f; /* 48px at 720p: left-edge guard */
   c.cursor_margin   = (float)g_h / 30.0f;    /* keep cursor point on screen */
   c.cursor_delay_frames = 1;         /* R3.57: visibility waits for actual menu frame */
   c.rotation        = 0;             /* Stupid Zombies is landscape; no TATE   */
