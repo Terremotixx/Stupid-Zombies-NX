@@ -134,7 +134,6 @@ python3 tools/analyze_debug_log.py debug.log
 
 The port is considered playable and stable.
 
-- Minor input/cursor edge cases may still occur with unusual combinations of inputs.
 - In some situations, the background may move slightly due to the way the original touch movement is translated to controller input. This is only a minor visual issue and does not affect gameplay.
 
 If you encounter a reproducible problem, please include the relevant `debug.log` when opening an issue.
