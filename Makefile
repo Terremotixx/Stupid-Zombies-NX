@@ -17,7 +17,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 TARGET := stupidzombies_nx
 APP_TITLE := Stupid Zombies NX
-APP_AUTHOR := GameResort / Switch wrapper
+APP_AUTHOR := GameResort / Terremotixx
 APP_VERSION := 1.0.0
 APP_ICON_CUSTOM := $(TOPDIR)/stupidzombies.jpg
 APP_ICON := $(if $(wildcard $(APP_ICON_CUSTOM)),$(APP_ICON_CUSTOM),$(DEVKITPRO)/libnx/default_icon.jpg)
