@@ -165,7 +165,7 @@
 /* Bump when shipping. Printed at compile time (#pragma message in main.c)
  * and at boot, so a stale source tree is obvious from either the build
  * output or debug.log. */
-#define ABR_SRC_REV "v1.0.0"
+#define ABR_SRC_REV "v1.0.1"
 /* ---- Android package -----------------------------------------------------
  * Verified package identifier for the supported Stupid Zombies Android build.
  * It is returned by the JNI compatibility layer as Application.identifier. */
