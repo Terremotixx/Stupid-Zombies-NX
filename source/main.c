@@ -46,7 +46,7 @@
  * something else. */
 #define NX_STR2(x) #x
 #define NX_STR(x) NX_STR2(x)
-#pragma message ("building abreloaded_nx source rev " ABR_SRC_REV " (DEBUG_LOG=" NX_STR(DEBUG_LOG) ")")
+#pragma message ("building Stupid Zombies NX " ABR_SRC_REV " (DEBUG_LOG=" NX_STR(DEBUG_LOG) ")")
 
 /* SZ_R3_LOADING_BEGIN
  * Very small pre-Unity loading screen. It owns libnx's default text console
@@ -860,7 +860,7 @@ static void check_data(int mounted) {
   /* Single-archive layout -- data.unity3d is the entry point.
    * (A data.unity3d build would have that single archive instead; this
    * game has no such file, which is what the old check tripped on.) */
-  /* ANGRY BIRDS RELOADED is a data.unity3d build: its whole scene/asset set is
+  /* STUPID ZOMBIES is a data.unity3d build: its whole scene/asset set is
    * ONE archive, and there is no `globalgamemanagers` file anywhere in the APK.
    * The Fruit Ninja base checked for globalgamemanagers, which can NEVER exist
    * here -- it would fail check_data() on a perfectly good install. Verified
@@ -1299,7 +1299,7 @@ static void nx_boot_il2cpp_hacks(void) {
 
 #if ABR_HAVE_TIME_HOOKS
   /* Redirect managed Time.get_* to our frame clock. The RVAs below are Fruit
-   * Ninja's; for Angry Birds Reloaded they are NOT derived, so ABR_HAVE_TIME_HOOKS
+   * Ninja's; for Stupid Zombies they are NOT derived, so ABR_HAVE_TIME_HOOKS
    * is 0 and this whole block is compiled out. (Leaving it in with zero offsets
    * would be inert -- the thunk-word check rejects them -- but it would log a
    * SKIP line per getter on every boot, which buries real failures.) */
@@ -1405,7 +1405,7 @@ static void nx_boot_il2cpp_hacks(void) {
 int main(int argc, char *argv[]) {
 (void)argc; (void)argv;
   socketInitializeDefault();
-  debugPrintf("[boot] === abreloaded_nx " ABR_SRC_REV " start (region64mb build) ===\n");
+  debugPrintf("[boot] === Stupid Zombies NX " ABR_SRC_REV " start ===\n");
 
   /* Load config.txt. When the file is
    * missing, autogenerate a documented one with the defaults; when it holds
@@ -1694,7 +1694,7 @@ int main(int argc, char *argv[]) {
     } else {
       /* The Fruit Ninja base printed a "~20+ min first load, ~4200 separate
        * resource files, go run asset_repack.py" banner here. That does not
-       * apply to Angry Birds Reloaded and printing it is actively misleading:
+       * apply to Stupid Zombies and printing it is actively misleading:
        * this game ships ONE archive (assets/bin/Data/data.unity3d, ~367 MB)
        * plus sharedassets0.resource, not thousands of loose resource files, so
        * there is nothing to repack and no 4200-file penalty to pay. A long
@@ -2119,7 +2119,7 @@ int main(int argc, char *argv[]) {
 
 
     /* Every block inside is independently gated and verify-first.  Time hooks
-     * remain disabled, while the Angry Birds-derived libunity preload sites run. */
+     * remain disabled, while the Stupid Zombies-derived libunity preload sites run. */
     nx_boot_il2cpp_hacks();
   }
 
