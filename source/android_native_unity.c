@@ -1,5 +1,4 @@
-/* android_native_unity.c -- the 27 NDK symbols libunity.so imports, for the
- * ZOOKEEPER DX Switch port. Unity is NOT a NativeActivity, so unlike cr3_nx's
+/* android_native_unity.c -- NDK compatibility layer used by Stupid Zombies NX. Unity is NOT a NativeActivity, so unlike cr3_nx's
  * android_native.c there is no ANativeActivity glue / android_main / AInputQueue
  * here: the engine is driven by the JNI-registered natives (see main.c). We only
  * provide the raw NDK functions libunity calls directly:
@@ -38,7 +37,7 @@ typedef struct ALooper       ALooper;
 /* ==========================================================================
  * dock-aware screen state (also read by unity_jni.c's Display getters)
  * ========================================================================== */
-static u32 g_w = 1280, g_h = 720;   /* PvZ Fusion: LANDSCAPE, matches Switch panel (was Zookeeper TATE 720x1280) */
+static u32 g_w = 1280, g_h = 720;   /* Stupid Zombies uses landscape render space. */
 
 void android_native_update_mode(void){
   /* Latched: read the mode ONCE at launch and hold it for the session. The
@@ -72,12 +71,9 @@ u32 android_native_height(void) { return g_h; }
  * uninitialized columns, which shows up as the image being "cut off" / garbage
  * on the right edge. Cropping to (0,0,bw,bh) guarantees only the rendered
  * content is presented (stretched to the panel, no cutoff). */
-/* PvZ Fusion is landscape, always: the game ships no portrait mode, and the
- * Switch panel is landscape too, so the render maps straight onto it. The
- * inherited TATE path -- a compositor rotation picked by config.portrait, from
- * the VLN reference port -- is gone along with the option that drove it.
- * Nothing rotates anywhere in this port now, so clear the buffer transform
- * explicitly rather than inheriting whatever a previous producer left set. */
+/* Stupid Zombies is landscape in this port, matching the Switch panel.
+ * Nothing rotates in the presentation path, so clear the buffer transform
+ * explicitly rather than inheriting a previous producer's state. */
 static void nx_window_set_geom(NWindow *w, u32 bw, u32 bh) {
   Result rc = nwindowSetDimensions(w, bw, bh);
   nwindowSetCrop(w, 0, 0, bw, bh);
@@ -220,18 +216,10 @@ void android_get_orientation(float *x, float *y, float *z){
 /* ==========================================================================
  * HID -> Unity input, via nx_pointer.
  *
- * nx_pointer owns every pointing device on the console -- touchscreen,
- * stick, USB mouse and gyro -- plus the on-screen cursor and its settings
- * file. Angry Birds Reloaded is a ONE-FINGER game: aiming the slingshot is a
- * single press-drag-release, so the Fruit Ninja base's TWO-cursor module was
- * swapped for the single-cursor one from the Papers, Please port. A second
- * cursor would have no slingshot to pull.
- * It hands back device-independent NxpEvents (id, x, y, phase); everything
- * below is the translation from those into the fake Android MotionEvents that
- * nativeInjectEvent expects (unity_input.c), and the B -> Back key mapping,
- * which is a game binding rather than a pointer concern.
- *
- * This replaces the port's original stick-cursor/dot-overlay implementation.
+ * nx_pointer owns touchscreen, stick, USB mouse and gyro input, plus the
+ * on-screen cursor. Stupid Zombies uses one active aiming pointer, so controller
+ * presses are translated into a normal Android-style press/drag/release gesture.
+ * The events are then converted into fake Android MotionEvents for Unity.
  * ========================================================================== */
 #include <stdio.h>
 #include "unity_input.h"
@@ -302,7 +290,7 @@ void android_native_input_init(void){
   c.cursor_margin_left = (float)g_h / 15.0f; /* 48px at 720p: slingshot guard */
   c.cursor_margin   = (float)g_h / 30.0f;    /* keep cursor point on screen */
   c.cursor_delay_frames = 1;         /* R3.57: visibility waits for actual menu frame */
-  c.rotation        = 0;             /* Angry Birds is landscape; no TATE      */
+  c.rotation        = 0;             /* Stupid Zombies is landscape; no TATE   */
   c.handle_touch    = 1;             /* module owns touch, as nx_pointer did   */
   c.log             = nxp_log_line;
   c.fopen_fn        = nx_fopen_locked;
