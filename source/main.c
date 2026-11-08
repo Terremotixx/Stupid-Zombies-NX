@@ -1298,11 +1298,9 @@ static void nx_boot_il2cpp_hacks(void) {
   uintptr_t b = (uintptr_t)il2cpp_mod.load_virtbase;
 
 #if ABR_HAVE_TIME_HOOKS
-  /* Redirect managed Time.get_* to our frame clock. The RVAs below are Fruit
-   * Ninja's; for Stupid Zombies they are NOT derived, so ABR_HAVE_TIME_HOOKS
-   * is 0 and this whole block is compiled out. (Leaving it in with zero offsets
-   * would be inert -- the thunk-word check rejects them -- but it would log a
-   * SKIP line per getter on every boot, which buries real failures.) */
+  /* Redirect managed Time.get_* to our frame clock. These inherited RVAs were
+   * not derived for Stupid Zombies, so ABR_HAVE_TIME_HOOKS is 0 and this block
+   * stays compiled out. */
   struct { uint32_t off; void *fn; const char *nm; } th[] = {
     { ABR_IL2_get_realtimeSinceStartup, (void *)&nx_realtime_since_startup, "realtimeSinceStartup" },
     { ABR_IL2_get_deltaTime,            (void *)&nx_delta_time,             "deltaTime" },
@@ -2118,8 +2116,8 @@ int main(int argc, char *argv[]) {
 #endif
 
 
-    /* Every block inside is independently gated and verify-first.  Time hooks
-     * remain disabled, while the Stupid Zombies-derived libunity preload sites run. */
+    /* Every block inside is independently gated and verify-first. Time hooks
+     * remain disabled; only verified compatibility patches are allowed to run. */
     nx_boot_il2cpp_hacks();
   }
 
