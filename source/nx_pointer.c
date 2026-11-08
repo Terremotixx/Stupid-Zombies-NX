@@ -997,6 +997,20 @@ void nxp_update(void) {
     const int button_static_ui = (frame_draws > 0 && frame_draws <= 3) ? 1 : 0;
     const int ui_class = (frame_draws <= 2) ? 0 : (frame_draws == 3 ? 1 : 2);
 
+    /* Controller hold rule:
+     * once a controller-generated drag has actually started, keep it alive
+     * until A/ZL/ZR is physically released.  Visual/draw-count classifiers
+     * are allowed to change underneath it, but they must never synthesize
+     * NXP_UP while the fire button is still down -- that is indistinguishable
+     * from the player releasing and makes the shot escape early.
+     *
+     * PLUS/pause is handled earlier by the dedicated START quarantine/cancel
+     * path, so it is intentionally not part of this latch. */
+    extern int sz_settings_is_open(void);
+    const int settings_open = sz_settings_is_open();
+    const int live_controller_hold =
+      (s_tap_prev && controller_held && !settings_open) ? 1 : 0;
+
     /* R3.67: a held controller button must never continue across screens.
      * Pointer reset closes the OLD gesture; quarantine prevents the same
      * physical hold from creating input on the destination screen. */
@@ -1004,7 +1018,8 @@ void nxp_update(void) {
     static int s_r367_hold_quarantine = 0;
 
     if (ui_class != s_r367_prev_ui_class) {
-      if (s_r367_prev_ui_class >= 0 && controller_held) {
+      if (s_r367_prev_ui_class >= 0 && controller_held &&
+          !live_controller_hold) {
         s_r367_hold_quarantine = 1;
 
         if (s_tap_prev) {
@@ -1019,6 +1034,9 @@ void nxp_update(void) {
 
         logf_("nxp: R3.67 transition quarantine %d->%d held=1\n",
               s_r367_prev_ui_class, ui_class);
+      } else if (s_r367_prev_ui_class >= 0 && live_controller_hold) {
+        logf_("nxp: hold-lock kept controller drag across UI class %d->%d (draws=%lu)\n",
+              s_r367_prev_ui_class, ui_class, frame_draws);
       }
 
       s_r367_prev_ui_class = ui_class;
@@ -1110,6 +1128,14 @@ void nxp_update(void) {
     }
 
     if (ui_class != s_last_ui_class) {
+      /* A live controller hold owns the gesture until physical release.
+       * Ignore draw-count class changes while it is active; these can flicker
+       * during gameplay and must not be converted into an early shot. */
+      if (live_controller_hold) {
+        logf_("nxp: hold-lock ignored UI transition %d->%d (draws=%lu)\n",
+              s_last_ui_class, ui_class, frame_draws);
+        s_last_ui_class = ui_class;
+      } else {
       /* R3.49 containment reset:
        * When the rendered screen class changes, kill ONLY controller-generated
        * pointer state before the destination screen can inherit it.
@@ -1139,15 +1165,18 @@ void nxp_update(void) {
             ui_class == 0 ? "STATIC" : (ui_class == 1 ? "LEVELS" : "DYNAMIC"),
             frame_draws);
       s_last_ui_class = ui_class;
+      }
     }
 
-    extern int sz_settings_is_open(void);
-
-    /* R3.59: outcome detection no longer uses draw-count guesses. */
+    /* R3.59: outcome detection no longer uses draw-count guesses.
+     * While a controller hold is already live, draw-count / result-visual
+     * flicker must not turn it into a click. Settings is still a hard stop. */
     const int r356_click_only_ui =
-      button_static_ui || sz_settings_is_open() ||
-      (s_r356_intro_guard > 0) ||
-      s_r362_result_visual;
+      settings_open ||
+      (!live_controller_hold &&
+       (button_static_ui ||
+        (s_r356_intro_guard > 0) ||
+        s_r362_result_visual));
 
     static int s_r356_prev_click_only = 0;
     if (r356_click_only_ui && !s_r356_prev_click_only &&
