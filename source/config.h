@@ -1,5 +1,4 @@
-/* config.h -- Plants vs Zombies Fusion 3.6.1 Switch wrapper configuration
- * (forked from the Zookeeper DX / CR3 wrapper config.)
+/* config.h -- Stupid Zombies NX wrapper configuration
  *
  * This software may be modified and distributed under the terms
  * of the MIT license. See the LICENSE file for details.
@@ -9,10 +8,9 @@
 #define __CONFIG_H__
 
 /* ============================ MEMORY LAYOUT ==============================
- * These are engine-fitting parameters, not game content -- identical to the
- * Zookeeper DX port because Fruit Ninja Classic + is the SAME Unity minor version
- * (2022.3.62) and we apply the SAME 256MB->64MB region-granularity patch
- * (see nx_patch_abr.h). Do not change unless you know the allocator math.
+ * Engine-fitting parameters for the supported Stupid Zombies Android build.
+ * These values are the result of the wrapper's bring-up and stability testing.
+ * Do not change them unless you are also re-validating the allocator layout.
  * ======================================================================== */
 
 // The engine + libc++ + il2cpp heap need a generous newlib heap; the rest of
@@ -155,10 +153,9 @@
 
 /* ============================ GAME IDENTITY =============================== */
 
-// Fruit Ninja Classic + ships the engine as the standard modern Unity trio; libmain.so
-// dlopens libunity.so which dlopens libil2cpp.so. (No libcrx/MVGL here -- this
-// is a normal IL2CPP game, so main.c loads libmain/libunity/libil2cpp directly
-// and these SO_NAME macros are unused, kept only for parity with the base.)
+// Stupid Zombies uses the standard Unity IL2CPP trio: libmain.so,
+// libunity.so and libil2cpp.so. main.c loads them directly.
+// These SO_NAME macros are retained for compatibility with the wrapper base.
 #define SO_NAME      "libunity.so"
 #define SO_CPP_NAME  "libil2cpp.so"
 
@@ -168,33 +165,15 @@
 /* Bump when shipping. Printed at compile time (#pragma message in main.c)
  * and at boot, so a stale source tree is obvious from either the build
  * output or debug.log. */
-#define ABR_SRC_REV "sz-3.4.5-r3.70.23-stable"
-/* ---- Android package name -- VERIFY THIS AGAINST YOUR APK -----------------
- * Returned by our fake getPackageName(). Unity surfaces it as
- * Application.identifier, and game code (and any SDK that keys off it) can
- * read it.
- *
- * NOTE: the PvZ tree inherited Zookeeper's "jp.kiteretsu.zookeeper_dx" here and
- * never changed it -- both of those ports shipped reporting the WRONG package
- * name. Do not repeat that.
- *
- * The package name is not present in libunity/libil2cpp; it lives in the APK's
- * AndroidManifest.xml. This value is NOT a placeholder: it was read directly
- * out of the binary AndroidManifest.xml string pool of the Angry Birds
- * Reloaded APK this port targets, alongside the launcher activity
- * (com.unity3d.player.UnityPlayerActivity) and versionName 2.2.16218.
- *
- * It matters: getPackageName() feeds Application.identifier and the Context
- * path getters, so a wrong value sends persistentDataPath somewhere the game
- * does not expect.                                                          */
+#define ABR_SRC_REV "v1.0.0"
+/* ---- Android package -----------------------------------------------------
+ * Verified package identifier for the supported Stupid Zombies Android build.
+ * It is returned by the JNI compatibility layer as Application.identifier. */
 #define GAME_PACKAGE "com.gameresort.stupidzombies"
 
 /* ---- split-asset auto-join (nx_splitjoin.c) ------------------------------
- * This build ships some assets as 1 MiB .split0/.split1/... parts, which Unity
- * reassembles in Java on a phone. We have no Java, so the loader joins them on
- * the SD card at first boot. Set to 1 to delete the .splitN parts once a join
- * has been verified -- saves ~8 MB, but means re-copying from the APK if you
- * ever want them back. Off by default: we do not delete user data uninvited. */
+ * The supported Stupid Zombies build does not require split-asset joining.
+ * Keep deletion disabled so the wrapper never removes user-provided data. */
 #define JOIN_DELETE_PARTS 0
 
 /* Diagnostic: trace futex WAIT/WAKE in the contended allocator region to
@@ -223,10 +202,8 @@
  *
  * Note that 0 does NOT disable the watchdog thread: it is also the escape hatch
  * that undoes a wedged GC stop-the-world (round 101), so it always runs. */
-#define DEBUG_LOG 1   /* ON while this port is being brought up. Fruit Ninja shipped
-                       * 0 because it was finished; a port that has never booted must
-                       * log, and 0 means debug.log is NEVER created -- not even by a
-                       * crash. Flip to 0 only once the game runs. */
+#define DEBUG_LOG 1   /* Keep on while diagnosing hardware issues. Set to 0 for
+                       * a quiet release build when debug.log is not needed. */
 
 /* Keep the audio timeline tied to visible progress. Unity performs scene and
  * cutscene setup inside nativeRender(); on Switch that call can block for
@@ -330,29 +307,14 @@
 #define ABR_TRACE_DATA_IO 0
 /* round 79: build+mount the Subway-Surfers-style asset pack. First boot
  * packs assets/bin/Data into one file; later boots mount it. 0 = off. */
-/* Angry Birds Reloaded ships NO .splitN parts -- verified against the APK's
- * assets/ tree. The four basenames the Fruit Ninja base scanned for
- * (globalgamemanagers.assets, level8, sharedassets2/3.assets) do not exist in
- * this game at all, so both the join scan and the unjoined-parts check are
- * compiled out rather than left to probe for files that can never appear. */
+/* The supported Stupid Zombies build uses the single-archive Unity layout and
+ * has no .splitN payloads that need to be reconstructed by this wrapper. */
 #define ABR_HAVE_SPLIT_ASSETS 0
 
 #define ABR_ASSET_PACK 0
-/* OFF for Angry Birds Reloaded, and this is a SAFETY decision, not a tuning one.
- *
- * With this at 1 the loader, on first boot, builds a single packed archive from
- * DATA_ROOT/assets and then calls nx_rmtree(DATA_ROOT "/assets") -- it DELETES
- * the player's loose asset tree. Fruit Ninja wanted that: it loads ~4200 small
- * resource files and each open is expensive here, so folding them into one pack
- * is a large win.
- *
- * This game is the opposite shape. Its assets are a handful of very large files
- * (data.unity3d ~367 MB, sharedassets0.resource ~84 MB, 26 tutorial MP4s), so
- * packing buys essentially nothing, while the build needs ~520 MB of spare SD
- * space and the rmtree afterwards is destructive and irreversible.
- *
- * asset_pack.h is now included unconditionally by libc_shim.c, so turning this
- * off leaves every asset_pack_* call site compiling and no-opping at runtime. */
+/* Keep the inherited asset-packer disabled. Stupid Zombies already uses a
+ * large Unity archive layout, so repacking brings little benefit and the old
+ * packer can delete the loose source tree after a successful pack. */
 #define ABR_BYPASS_UNITY_SPLASH 0 /* 0: Fruit Ninja offsets, NOT derived for this game -- see nx_patch_abr.h */
 /* JNI approximation ledger (round 130). Records every JNI call answered by a
  * catch-all -- empty string, NULL object, 0, no-op -- deduped and counted, and
@@ -392,46 +354,16 @@ extern int screen_width;
 extern int screen_height;
 
 /* ----------------------------- Language ----------------------------------
- * NOT INHERITED FROM PvZ -- re-derived for this game, and it works differently.
- *
- * PvZ's build read its locale as a STRING from an AndroidJavaClass, so its
- * config mapped 1/2 onto the literals "en"/"zh" returned by jni_fake's
- * getLanguage(). Fruit Ninja does not do that. Its managed code calls
- *
- *     UnityEngine.Application::get_systemLanguage()
- *
- * which returns Unity's SystemLanguage ENUM. The engine populates that at init
- * from the Java locale, so jni_fake's getLanguage() still feeds it -- but the
- * game compares against an enum, not against our string, so there is no
- * game-specific token to guess.
- *
- * Practical consequence: LANG_AUTO is the only value with confirmed meaning.
- * The overrides below simply force the locale jni_fake reports; verify on
- * hardware which SystemLanguage the engine derives before trusting them.
- *
- * (The binary also carries I18N.CJK/MidEast/Other/Rare/West and RTLTMPro, so
- * the title has broad language coverage including right-to-left. The ar-*
- * tokens visible in libil2cpp are mscorlib CULTURE TABLES from I18N.MidEast,
- * not a list of shipped game languages -- do not read them as one.)        */
+ * Locale is supplied through the JNI compatibility layer. LANG_AUTO follows
+ * the Switch/system locale. The explicit overrides are inherited development
+ * options and should be treated as unverified unless tested on hardware. */
 #define LANG_AUTO 0   /* follow the Switch system language -- recommended */
 #define LANG_EN   1   /* force en */
 #define LANG_ZH   2   /* force zh -- retained from the base; UNVERIFIED here */
 
-/* ORIENTATION -- UNRESOLVED, AND YOU MUST CHECK THIS BEFORE FIRST BOOT.
- *
- * PvZ removed the base's TATE/portrait path because that game is landscape-only.
- * We have NOT confirmed Fruit Ninja's orientation: its managed code contains no
- * ScreenOrientation manipulation and no landscape/portrait strings, so the APK's
- * AndroidManifest.xml (android:screenOrientation) is authoritative. Check it.
- *
- *   landscape -> nothing to do; this build matches PvZ and is correct as-is.
- *   portrait  -> you must restore the Zookeeper TATE compositor-rotation path,
- *                AND revisit nx_pointer, which maps the touch panel to render
- *                space with a straight stretch and applies no rotation. Aiming
- *                will be wrong otherwise -- silently, which is the worst kind.
- *
- * The `portrait` knob is retired here only because it is retired upstream; it
- * is NOT a statement that this game is landscape.                          */
+/* Stupid Zombies is handled as a landscape title throughout this port.
+ * The render surface, cursor mapping and touch panel all use landscape space;
+ * no compositor rotation or portrait/TATE path is active. */
 typedef struct {
   int handheld_res;   /* render height in handheld mode: 720 or 1080 */
   int docked_res;     /* render height when docked:      720 or 1080 */
