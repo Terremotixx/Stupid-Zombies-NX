@@ -19,7 +19,8 @@ TARGET := stupidzombies_nx
 APP_TITLE := Stupid Zombies
 APP_AUTHOR := GameResort / Switch wrapper
 APP_VERSION := 3.4.5-bringup1
-APP_ICON := $(TOPDIR)/stupidzombies.jpg
+APP_ICON_CUSTOM := $(TOPDIR)/stupidzombies.jpg
+APP_ICON := $(if $(wildcard $(APP_ICON_CUSTOM)),$(APP_ICON_CUSTOM),$(DEVKITPRO)/libnx/default_icon.jpg)
 export APP_TITLE APP_AUTHOR APP_VERSION APP_ICON
 BUILD     := build
 SOURCES   := source
