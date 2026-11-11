@@ -38,6 +38,11 @@ typedef struct ALooper       ALooper;
  * dock-aware screen state (also read by unity_jni.c's Display getters)
  * ========================================================================== */
 static u32 g_w = 1280, g_h = 720;   /* Stupid Zombies uses landscape render space. */
+static int g_is_switch_lite = 0;
+
+int android_native_is_switch_lite(void) {
+  return g_is_switch_lite;
+}
 
 void android_native_update_mode(void){
   /* Latched: read the mode ONCE at launch and hold it for the session. The
@@ -48,7 +53,29 @@ void android_native_update_mode(void){
   if (latched) return;
   latched = 1;
 
-  const int docked = (appletGetOperationMode() == AppletOperationMode_Console);
+  /* Do not trust AppletOperationMode blindly on Switch Lite. The Lite is
+   * physically handheld-only, but a stale/forced applet state can still report
+   * Console. Detect the hardware model and force handheld semantics on Hoag. */
+  SetSysProductModel model = SetSysProductModel_Invalid;
+  Result model_rc = setsysInitialize();
+  if (R_SUCCEEDED(model_rc)) {
+    model_rc = setsysGetProductModel(&model);
+    setsysExit();
+  }
+  g_is_switch_lite =
+    R_SUCCEEDED(model_rc) && model == SetSysProductModel_Hoag;
+
+  const int reported_docked =
+    (appletGetOperationMode() == AppletOperationMode_Console);
+  const int docked = reported_docked && !g_is_switch_lite;
+
+  if (g_is_switch_lite && reported_docked)
+    debugPrintf("[boot] Switch Lite detected: ignoring false docked operation mode\n");
+  else
+    debugPrintf("[boot] product model=%d lite=%d operation=%s\n",
+                (int)model, g_is_switch_lite,
+                reported_docked ? "docked" : "handheld");
+
   int h = docked ? config.docked_res : config.handheld_res;
   if (h != 720 && h != 1080) h = docked ? 1080 : 720;   /* belt and braces */
   if (h == 1080) { g_w = 1920; g_h = 1080; }
