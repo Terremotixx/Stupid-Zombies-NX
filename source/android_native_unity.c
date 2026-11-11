@@ -615,9 +615,11 @@ void android_native_feed_hid(inject_fn inject, void *env, void *thiz){
           (y >= 0.0f && y <= (float)g_h * 0.20f &&
            x >= 0.0f && x <= (float)g_w * 0.92f);
 
+        /* 190x170 is the proven 1280x720 top-left Back region.
+         * Express it proportionally so 1080p uses the identical logical area. */
         const int top_left =
-          (x >= 0.0f && x <= 190.0f &&
-           y >= 0.0f && y <= 170.0f);
+          (x >= 0.0f && x <= (float)g_w * (190.0f / 1280.0f) &&
+           y >= 0.0f && y <= (float)g_h * (170.0f / 720.0f));
 
         if (g_sz_mainmenu_root) {
           /* ONLY the actual root menu gets the privacy/legal dead-zone. */
