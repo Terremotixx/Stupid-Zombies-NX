@@ -175,6 +175,18 @@ int sz_store_menu_take_b(void) {
 
 int sz_store_handle_pointer_down(float x, float y) {
     extern volatile unsigned long g_sz_last_frame_draws;
+    extern u32 android_native_width(void);
+    extern u32 android_native_height(void);
+
+    /* All Store/Settings hit boxes below were derived and hardware-tested in
+     * the game's 1280x720 logical layout. Pointer events arrive in render
+     * coordinates, which may be 1920x1080 when docked or when a homebrew MITM
+     * requests 1080p. Normalize once so the exact same policy applies at every
+     * render resolution. */
+    const u32 render_w = android_native_width();
+    const u32 render_h = android_native_height();
+    if (render_w > 0) x = x * (1280.0f / (float)render_w);
+    if (render_h > 0) y = y * (720.0f / (float)render_h);
 
     /* R3.70.5 Store entry Y guard.
      *
