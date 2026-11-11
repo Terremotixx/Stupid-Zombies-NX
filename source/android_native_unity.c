@@ -38,53 +38,33 @@ typedef struct ALooper       ALooper;
  * dock-aware screen state (also read by unity_jni.c's Display getters)
  * ========================================================================== */
 static u32 g_w = 1280, g_h = 720;   /* Stupid Zombies uses landscape render space. */
-static int g_is_switch_lite = 0;
-
-int android_native_is_switch_lite(void) {
-  return g_is_switch_lite;
-}
 
 void android_native_update_mode(void){
   /* Latched: read the mode ONCE at launch and hold it for the session. The
    * render size feeds the graphics surface and the engine builds its render
    * target against it, so it cannot change underneath either of them --
-   * which is also why config.txt says to dock BEFORE launching. */
+   * which is also why config.txt says to dock BEFORE launching.
+   *
+   * Important: operation mode selects render resolution only. Input capability
+   * is handled independently by nx_pointer, so a homebrew MITM may request
+   * 1080p without disabling the physical touchscreen on handheld hardware. */
   static int latched = 0;
   if (latched) return;
   latched = 1;
 
-  /* Do not trust AppletOperationMode blindly on Switch Lite. The Lite is
-   * physically handheld-only, but a stale/forced applet state can still report
-   * Console. Detect the hardware model and force handheld semantics on Hoag. */
-  SetSysProductModel model = SetSysProductModel_Invalid;
-  Result model_rc = setsysInitialize();
-  if (R_SUCCEEDED(model_rc)) {
-    model_rc = setsysGetProductModel(&model);
-    setsysExit();
-  }
-  g_is_switch_lite =
-    R_SUCCEEDED(model_rc) && model == SetSysProductModel_Hoag;
-
-  const int reported_docked =
+  const int docked =
     (appletGetOperationMode() == AppletOperationMode_Console);
-  const int docked = reported_docked && !g_is_switch_lite;
-
-  if (g_is_switch_lite && reported_docked)
-    debugPrintf("[boot] Switch Lite detected: ignoring false docked operation mode\n");
-  else
-    debugPrintf("[boot] product model=%d lite=%d operation=%s\n",
-                (int)model, g_is_switch_lite,
-                reported_docked ? "docked" : "handheld");
-
   int h = docked ? config.docked_res : config.handheld_res;
-  if (h != 720 && h != 1080) h = docked ? 1080 : 720;   /* belt and braces */
+  if (h != 720 && h != 1080) h = docked ? 1080 : 720;
   if (h == 1080) { g_w = 1920; g_h = 1080; }
   else           { g_w = 1280; g_h = 720;  }
+
   debugPrintf("[boot] render %ux%u (%s, config %d)\n",
-              (unsigned)g_w, (unsigned)g_h, docked ? "docked" : "handheld", h);
-  /* Landscape throughout: keep the engine-reported surface size equal to the
-   * real window so the render target matches what we present (no mismatch). */
-  screen_width = (int)g_w; screen_height = (int)g_h;
+              (unsigned)g_w, (unsigned)g_h,
+              docked ? "docked" : "handheld", h);
+
+  screen_width = (int)g_w;
+  screen_height = (int)g_h;
 }
 u32 android_native_width(void)  { return g_w; }
 u32 android_native_height(void) { return g_h; }
