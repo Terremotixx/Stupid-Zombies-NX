@@ -933,8 +933,11 @@ void nxp_update(void) {
   s_nev = 0;
 
   if (s_r364_settings_back_pending) {
-    const float bx = (float)s_cfg.panel_w * 0.070f;
-    const float by = (float)s_cfg.panel_h * 0.130f;
+    /* Synthetic pointer events are emitted in render coordinates, exactly like
+     * the controller cursor. Use the active render size so this lands on the
+     * same logical arrow at both 720p and 1080p. */
+    const float bx = (float)s_cfg.screen_w * 0.070f;
+    const float by = (float)s_cfg.screen_h * 0.130f;
 
     /* Same logical top-left arrow area that works by real touch, but now the
      * event traverses the normal R3.61 Settings state machine. */
