@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.2
+
+- Kept touchscreen input active when homebrew is reported as docked.
+- Fixed touch and controller interaction when running at 1920x1080.
+- Normalized Store and Settings hitboxes across 720p and 1080p.
+- Fixed synthetic Settings back input at 1080p.
+- Scaled menu back/protected input regions with the active render resolution.
+- Improved compatibility with externally forced docked/1080p homebrew mode.
+
 ## v1.0.1
 
 - Fixed intermittent controller hold/aim input with A, ZL and ZR.
