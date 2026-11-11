@@ -143,12 +143,7 @@ static int      s_nev;
 #define GYRO_MIN    0.10f
 #define GYRO_MAX    8.0f
 
-extern int android_native_is_switch_lite(void);
-
 static int is_docked(void) {
-  /* A Switch Lite can never be physically docked. Keep pointer/touch behavior
-   * handheld even if applet state is stale or externally forced to Console. */
-  if (android_native_is_switch_lite()) return 0;
   return appletGetOperationMode() == AppletOperationMode_Console;
 }
 
@@ -951,7 +946,14 @@ void nxp_update(void) {
           (double)bx, (double)by);
   }
 
-  if (!docked) do_touch();                 /* touchscreen: handheld only */
+  /* Poll the touchscreen in every operation mode.
+   *
+   * On a physically docked Switch there are simply no panel touches to report,
+   * so this is harmless. On handheld hardware, however, an external MITM such
+   * as Switch Frame Tap may intentionally report Console mode to request 1080p.
+   * Touch coordinates are already scaled from the fixed 1280x720 panel space
+   * into the active render resolution, so touch remains correct at 720p/1080p. */
+  do_touch();
 
   /* Mouse first: it sets s_mouse_connected, which gates the gyro below. */
   const int mouse_tap = do_mouse();
