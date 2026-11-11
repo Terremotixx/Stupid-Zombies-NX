@@ -143,7 +143,12 @@ static int      s_nev;
 #define GYRO_MIN    0.10f
 #define GYRO_MAX    8.0f
 
+extern int android_native_is_switch_lite(void);
+
 static int is_docked(void) {
+  /* A Switch Lite can never be physically docked. Keep pointer/touch behavior
+   * handheld even if applet state is stale or externally forced to Console. */
+  if (android_native_is_switch_lite()) return 0;
   return appletGetOperationMode() == AppletOperationMode_Console;
 }
 
